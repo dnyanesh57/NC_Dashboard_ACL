@@ -34,6 +34,72 @@ BLACK = "#000000"
 GREY  = "#939598"
 BLUE  = "#00AEDA"
 
+# ---------- Brand-aware colour helpers (unique brand-only colours) ----------
+from typing import Sequence  # add to your imports
+
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#%02X%02X%02X" % rgb
+
+def _mix(c1: str, c2: str, t: float) -> str:
+    r1, g1, b1 = _hex_to_rgb(c1); r2, g2, b2 = _hex_to_rgb(c2)
+    r = int(round(r1 + (r2 - r1) * t))
+    g = int(round(g1 + (g2 - g1) * t))
+    b = int(round(b1 + (b2 - b1) * t))
+    return _rgb_to_hex((r, g, b))
+
+def _text_on(bg_hex: str) -> str:
+    r, g, b = _hex_to_rgb(bg_hex)
+    lum = 0.2126*r + 0.7152*g + 0.0722*b
+    return WHITE if lum < 140 else BLACK
+
+def sample_brand_gradient(n: int, clamp: tuple[float, float] = (0.06, 0.94)) -> list[str]:
+    """
+    Evenly sample n distinct colours from the brand gradient WHITE→BLUE→BLACK,
+    clamping ends so we never hit pure white/black.
+    """
+    if n <= 0:
+        return []
+    xs = np.linspace(clamp[0], clamp[1], n)
+    out: list[str] = []
+    for t in xs:
+        if t <= 0.5:
+            out.append(_mix(WHITE, BLUE, (t - 0.0) / 0.5))
+        else:
+            out.append(_mix(BLUE, BLACK, (t - 0.5) / 0.5))
+    # enforce uniqueness defensively
+    seen = set(); uniq = []
+    for i, c in enumerate(out):
+        u = c.upper()
+        if u in seen:
+            tj = float(xs[i]) + 0.001
+            tj = min(clamp[1], max(clamp[0], tj))
+            c = _mix(WHITE, BLUE, (tj - 0.0)/0.5) if tj <= 0.5 else _mix(BLUE, BLACK, (tj - 0.5)/0.5)
+            u = c.upper()
+        uniq.append(c); seen.add(u)
+    return uniq
+
+def generate_brand_sequence(n: int) -> list[str]:
+    """
+    Start with base 3, expand with gradient to guarantee n unique brand-only colours.
+    Ensures no brand colour is used more than once in a given mapping.
+    """
+    base = BRAND_SEQ[:]  # e.g., [BLUE, GREY, BLACK] and all unique
+    if n <= len(base):
+        return base[:n]
+    extra = sample_brand_gradient(n - len(base))
+    return base + extra
+
+def brand_map_for(values: Sequence) -> dict[str, str]:
+    """Stable map: each unique value → a distinct brand-derived colour."""
+    vals = [str(v) for v in values]
+    cols = generate_brand_sequence(len(vals))
+    return dict(zip(vals, cols))
+
+
 # Helpers to create brand-based gradient colours (no extra hues)
 def _hex_to_rgb(h: str) -> Tuple[int,int,int]:
     h = h.lstrip("#")
