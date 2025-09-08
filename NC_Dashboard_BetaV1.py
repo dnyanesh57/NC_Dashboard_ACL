@@ -2,19 +2,17 @@
 # Digital NC Register — Streamlit (SJCPL Brand)
 # - Brand-locked palette: Blue(#00AEDA), Black(#000000), Grey(#939598), White(#FFFFFF)
 # - Roboto everywhere (UI + Plotly)
-# - Removed multi-theme selector and non-brand colours
+# - No brand colour reused within a chart; dynamic colours sampled from brand gradient
 # - All charts & states re-mapped to brand colours
 # - Business logic identical to V2.5
-# - NEW: universal loader (CSV/XLSX, encodings, GitHub demo), safe col normalization, dedupe
 # --------------------------------------------------------------
 # Run:
 #   pip install -U streamlit plotly pandas numpy openpyxl
 #   streamlit run digiqc_dashboard_NC_V2.5_BRAND.py
 
-from typing import Optional, Any, Tuple, List
+from typing import Optional, Any, Tuple, List, Sequence
 import datetime as dt
 import re
-import io  # NEW
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -36,8 +34,7 @@ BLACK = "#000000"
 GREY  = "#939598"
 BLUE  = "#00AEDA"
 
-# Status colours mapped to brand-only choices.
-# Note: With a 4-colour brand, some statuses share colours by design.
+# Status colours mapped to brand-only choices (defaults; will be overridden per-view with unique maps)
 SJCPL_STATUS = {
     "Closed":     BLACK,      # Terminal / final
     "Resolved":   BLACK,      # Effective resolution (same visual as Closed)
@@ -65,7 +62,7 @@ BRAND_GRADIENT = [
     [1.0, BLACK],
 ]
 
-# Discrete cycling palette (charts that need multiple series)
+# Discrete base palette (used when few series); extended dynamically as needed
 BRAND_SEQ = [BLUE, GREY, BLACK]
 
 THEMES = {
@@ -80,6 +77,73 @@ THEMES = {
 
 # Single, locked theme
 theme = "SJCPL"
+
+# ---------- Brand-aware colour helpers ----------
+def _hex_to_rgb(h: str) -> tuple[int,int,int]:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+def _rgb_to_hex(rgb: tuple[int,int,int]) -> str:
+    return "#%02X%02X%02X" % rgb
+
+def _mix(c1: str, c2: str, t: float) -> str:
+    r1,g1,b1 = _hex_to_rgb(c1); r2,g2,b2 = _hex_to_rgb(c2)
+    r = int(round(r1 + (r2 - r1) * t))
+    g = int(round(g1 + (g2 - g1) * t))
+    b = int(round(b1 + (b2 - b1) * t))
+    return _rgb_to_hex((r, g, b))
+
+def _text_on(bg_hex: str) -> str:
+    r,g,b = _hex_to_rgb(bg_hex)
+    # perceptual luminance
+    lum = 0.2126*r + 0.7152*g + 0.0722*b
+    return WHITE if lum < 140 else BLACK
+
+def sample_brand_gradient(n: int, clamp: tuple[float,float]=(0.06, 0.94)) -> list[str]:
+    """
+    Evenly sample n distinct colours from the brand gradient WHITE→BLUE→BLACK,
+    clamping ends so we never hit pure white/black.
+    """
+    if n <= 0: return []
+    xs = np.linspace(clamp[0], clamp[1], n)
+    out: list[str] = []
+    for t in xs:
+        if t <= 0.5:
+            local = (t - 0.0) / 0.5
+            out.append(_mix(WHITE, BLUE, local))
+        else:
+            local = (t - 0.5) / 0.5
+            out.append(_mix(BLUE, BLACK, local))
+    # ensure uniqueness (defensive)
+    seen = set(); uniq = []
+    for i, c in enumerate(out):
+        u = c.upper()
+        if u in seen:
+            # tiny nudge along gradient to avoid duplicates
+            tj = float(xs[i]) + 0.001
+            tj = min(clamp[1], max(clamp[0], tj))
+            if tj <= 0.5:
+                cj = _mix(WHITE, BLUE, (tj - 0.0)/0.5)
+            else:
+                cj = _mix(BLUE, BLACK, (tj - 0.5)/0.5)
+            c = cj
+            u = c.upper()
+        uniq.append(c); seen.add(u)
+    return uniq
+
+def generate_brand_sequence(n: int) -> list[str]:
+    """Start with base 3, expand with gradient to guarantee n unique brand-only colours."""
+    base = BRAND_SEQ[:]
+    if n <= len(base):
+        return base[:n]
+    extra = sample_brand_gradient(n - len(base))
+    return base + extra
+
+def brand_map_for(values: Sequence) -> dict[str,str]:
+    """Stable map: each unique value → a distinct brand-derived colour."""
+    vals = [str(v) for v in values]
+    cols = generate_brand_sequence(len(vals))
+    return dict(zip(vals, cols))
 
 def style_fig(fig, theme_name: str):
     fig.update_layout(
@@ -193,13 +257,11 @@ def humanize_td(td: pd.Series) -> pd.Series:
         return " ".join(parts) if parts else "0m"
     return td.apply(_fmt)
 
-def style_status_rows(df: pd.DataFrame, theme_name: str) -> Styler:
-    status_map = THEMES[theme_name]["status_map"]
+def style_status_rows(df: pd.DataFrame, status_map: dict) -> Styler:
     def highlight(row):
         status = str(row.get("Current Status", "")).strip()
         bg = status_map.get(status, WHITE)
-        # Ensure text remains readable on Black/Grey
-        txt = WHITE if bg in (BLACK, GREY) else BLACK
+        txt = _text_on(bg)
         return [f"background-color: {bg}; color: {txt};"] * len(row)
     return df.style.apply(highlight, axis=1)
 
@@ -300,11 +362,13 @@ def bar_top_counts(df: pd.DataFrame, col: str, topn: int = 10, color_seq=None, t
         return px.bar(pd.DataFrame({col: [], "count": []}), x="count", y=col, template=template)
     labels = df[col].apply(_to_label)
     vc = labels.value_counts(dropna=False).head(topn)
-    counts = pd.DataFrame({col: vc.index.astype(str).tolist(), "count": vc.values})
+    cats = [str(x) for x in vc.index.tolist()]
+    counts = pd.DataFrame({col: cats, "count": vc.values})
+    cmap = brand_map_for(cats)
     fig = px.bar(
         counts.sort_values("count", ascending=True),
         x="count", y=col, orientation="h",
-        color=col, color_discrete_sequence=color_seq, template=template, text_auto=True
+        color=col, color_discrete_map=cmap, template=template, text_auto=True
     )
     fig.update_layout(yaxis=dict(autorange="reversed"))
     return style_fig(fig, theme_name)
@@ -342,48 +406,6 @@ def metrics_summary(df: pd.DataFrame, theme_name: str):
     with t5: st.metric("Median Responding Time", _fmt(median_response))
     with t6: st.metric("SLA Met Rate", f"{sla_rate:.1f}%" if pd.notna(sla_rate) else "—")
 
-# ----------------------------- Load data ----------------------------
-def normalize_colname(c: str) -> str:
-    """Keep official column labels intact, but clean whitespace and unicode quirks."""
-    s = str(c).replace("\u2013", "-").replace("\u2014", "-").replace("\u00A0", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
-    """
-    Robust reader:
-      - If file is None: pull demo CSV from GitHub
-      - Else: try Excel, else CSV with multiple encodings
-      - Normalize column names and drop duplicate columns
-    """
-    if file is None:
-        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
-        try:
-            df = pd.read_csv(default_path)
-        except Exception:
-            st.error("No file uploaded and demo CSV not found in working directory.")
-            st.stop()
-    else:
-        name = getattr(file, "name", "uploaded.csv").lower()
-        if name.endswith(".xlsx") or name.endswith(".xls"):
-            df = pd.read_excel(file)
-        else:
-            # Try a few encodings for CSV
-            for enc in [None, "utf-8", "utf-8-sig", "latin-1"]:
-                try:
-                    file.seek(0)
-                    df = pd.read_csv(file, encoding=enc)
-                    break
-                except Exception:
-                    continue
-            else:
-                st.error("Could not read the uploaded CSV with common encodings.")
-                st.stop()
-    # Clean & dedupe headers safely (does NOT change label wording)
-    df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
-    df = df.loc[:, ~pd.Series(df.columns).duplicated().values]
-    return df
-
 # ---------- Sidebar (brand-locked) ----------
 with st.sidebar:
     st.title("🧭 Digital NC Register")
@@ -391,8 +413,9 @@ with st.sidebar:
     # Optional logo
     logo_url = st.text_input("Logo URL (optional)", value="")
     st.markdown("#### Data Source")
-    uploaded = st.file_uploader("Upload Issue Register (CSV / XLSX)", type=["csv", "xlsx", "xls"], key="uploader")  # UPDATED
-    use_default = st.toggle("Use default (demo from GitHub)", value=True, key="use-default")  # UPDATED label
+    DEFAULT_PATH = r"C:\Users\Lenovo\Downloads\CSV-INSTRUCTION-DETAIL-REPORT-08-28-2025-08-33-46.csv"
+    uploaded = st.file_uploader("Upload Issue Register CSV", type=["csv"], key="uploader")
+    use_default = st.toggle("Use default (auto-loaded)", value=True, key="use-default")
 
 # Apply brand defaults for Plotly
 px.defaults.template = THEMES[theme]["template"]
@@ -454,20 +477,31 @@ st.markdown(
 
 # ---------- Data load (cached) ----------
 @st.cache_data(show_spinner=False)
+def read_csv_bytes(b: bytes) -> pd.DataFrame:
+    from io import BytesIO
+    return pd.read_csv(BytesIO(b))
+
+@st.cache_data(show_spinner=False)
+def read_csv_path(p: str) -> pd.DataFrame:
+    return pd.read_csv(p)
+
+@st.cache_data(show_spinner=False)
 def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
-    # Keep official labels, but trim surrounding spaces if any slipped through
     df.columns = [c.strip() for c in df.columns]
     return add_derived_columns(df)
 
-# Use new loader (uploaded or demo)
 if uploaded is not None:
-    df_raw = load_data(uploaded)
+    df_raw = read_csv_bytes(uploaded.getvalue())
 elif use_default:
-    df_raw = load_data(None)
-    st.info("Loaded demo CSV from GitHub.")
+    try:
+        df_raw = read_csv_path(DEFAULT_PATH)
+        st.info(f"Loaded default file: `{DEFAULT_PATH}`")
+    except Exception as e:
+        st.error(f"Unable to load default file. Please upload. Error: {e}")
+        st.stop()
 else:
-    st.warning("Please upload a CSV/XLSX to continue.")
+    st.warning("Please upload a CSV to continue.")
     st.stop()
 
 df = preprocess(df_raw)
@@ -529,8 +563,17 @@ def filtered_view(df: pd.DataFrame) -> pd.DataFrame:
 df_filtered = filtered_view(df)
 st.divider()
 
-metric_colors = THEMES[theme]["metric_map"]
-status_colors = THEMES[theme]["status_map"]
+# ---------- Dynamic, per-view colour maps (unique per chart) ----------
+def _uniq(col: str) -> List[str]:
+    return df_filtered.get(col, pd.Series(dtype=str)).dropna().astype(str).unique().tolist()
+
+metric_colors = THEMES[theme]["metric_map"]  # keep for single-series colours
+status_colors = THEMES[theme]["status_map"]  # default fallback
+
+STATUS_COLOR_MAP = brand_map_for(sorted(_uniq("Current Status")))
+METRIC_MAP_2 = brand_map_for(["Total", "Rejected→Closed"])
+METRIC_MAP_3 = brand_map_for(["Resolved", "R2C", "RespOnly"])
+METRIC_MAP_4 = brand_map_for(["Total", "Resolved", "R2C", "RespOnly"])
 
 mask_r2c_inferred   = (df_filtered["_R2C_Flag"] == 1)
 mask_responly       = (df_filtered["_RespondedNotClosed_Flag"] == 1)
@@ -564,7 +607,7 @@ with tabs[0]:
         x="Count", y="Metric", orientation="h",
         text_auto=True, title="Comparative — Total vs Rejected→Closed (inferred)",
         color="Metric",
-        color_discrete_map={"Total": metric_colors["Total"], "Rejected→Closed": metric_colors["R2C"]}
+        color_discrete_map=METRIC_MAP_2
     )
     show_chart(style_fig(fig_comp, theme), key="ov-comp-r2c")
 
@@ -576,7 +619,7 @@ with tabs[0]:
             resp_counts.sort_values("Responded not Closed"),
             x="Responded not Closed", y="Assignee", orientation="h",
             title="Responded but NOT Closed — by Assignee",
-            color_discrete_sequence=[metric_colors["RespOnly"]]
+            color_discrete_sequence=[metric_colors["RespOnly"]]  # single-series is fine
         )
         show_chart(style_fig(fig_resp_only, theme), key="ov-responded-not-closed-assignee")
 
@@ -596,7 +639,7 @@ with tabs[0]:
         vc = df_filtered["Current Status"].value_counts(dropna=False).reset_index()
         vc.columns = ["Current Status","Count"]
         fig_sd = px.bar(vc, x="Current Status", y="Count", text_auto=True, title="Current Status Distribution",
-                        color="Current Status", color_discrete_map=status_colors)
+                        color="Current Status", color_discrete_map=STATUS_COLOR_MAP)
         fig_sd.update_xaxes(tickangle=0, tickfont=dict(size=11))
         show_chart(style_fig(fig_sd, theme), key="ov-status-dist")
 
@@ -646,10 +689,9 @@ with tabs[1]:
         st.dataframe(grp, use_container_width=True)
 
         melted = grp.melt(id_vars=["Project Name"], value_vars=["Total","Resolved","R2C","RespOnly"], var_name="Metric", value_name="Count")
-        color_map = {"Total":metric_colors["Total"], "Resolved":metric_colors["Resolved"], "R2C":metric_colors["R2C"], "RespOnly":metric_colors["RespOnly"]}
         fig_proj = px.bar(melted, x="Project Name", y="Count", color="Metric", barmode="group",
                           title="Project — Total vs Resolved vs Rejected→Closed vs Responded-not-Closed",
-                          color_discrete_map=color_map)
+                          color_discrete_map=METRIC_MAP_4)
         fig_proj.update_xaxes(tickangle=30, tickfont=dict(size=11))
         show_chart(style_fig(fig_proj, theme), key="tab1-project-bar")
     else:
@@ -715,10 +757,9 @@ with tabs[3]:
         st.dataframe(grp.sort_values("Total", ascending=False), use_container_width=True)
 
         melted = grp.melt(id_vars=[tower_col], value_vars=["Total","Resolved","R2C","RespOnly"], var_name="Metric", value_name="Count")
-        color_map = {"Total":metric_colors["Total"], "Resolved":metric_colors["Resolved"], "R2C":metric_colors["R2C"], "RespOnly":metric_colors["RespOnly"]}
         fig_tower = px.bar(melted, x=tower_col, y="Count", color="Metric", barmode="group",
                            title="Tower — Total vs Resolved vs Rejected→Closed vs Responded-not-Closed",
-                           color_discrete_map=color_map)
+                           color_discrete_map=METRIC_MAP_4)
         fig_tower.update_xaxes(tickangle=30, tickfont=dict(size=11))
         show_chart(style_fig(fig_tower, theme), key="tab3-tower-group")
     else:
@@ -746,11 +787,10 @@ with tabs[4]:
         tot = long_u.groupby("Assigned Team User")["Count"].sum().sort_values(ascending=False).head(topN).index
         long_u_top = long_u[long_u["Assigned Team User"].isin(tot)]
 
-        color_map = {"Resolved":metric_colors["Resolved"], "R2C":metric_colors["R2C"], "RespOnly":metric_colors["RespOnly"]}
         fig_u_grp = px.bar(long_u_top.sort_values("Count"),
                            x="Count", y="Assigned Team User", color="Metric", barmode="group",
-                           title="User — Resolved vs Rejected→Closed vs Responded-not-Closed (Top N)",
-                           color_discrete_map=color_map, text_auto=True)
+                           title="User — Resolved vs Rejected-not-Closed vs Responded-not-Closed (Top N)",
+                           color_discrete_map=METRIC_MAP_3, text_auto=True)
         fig_u_grp.update_yaxes(categoryorder="total ascending")
         show_chart(style_fig(fig_u_grp, theme), key="tab4-u-group")
 
@@ -829,11 +869,10 @@ with tabs[5]:
         agg = agg.sort_values("Total", ascending=False).head(topn)
 
         melted = agg.melt(id_vars=[by_col], value_vars=["Total","R2C","RespOnly"], var_name="Metric", value_name="Count")
-        color_map = {"Total":metric_colors["Total"], "R2C":metric_colors["R2C"], "RespOnly":metric_colors["RespOnly"]}
         fig = px.bar(
             melted, x=by_col, y="Count", color="Metric", barmode="group",
             title=f"{by_col} — Total vs R→C vs Responded-not-Closed (Top {topn})",
-            color_discrete_map=color_map, text_auto=True
+            color_discrete_map=METRIC_MAP_4, text_auto=True
         )
         fig.update_xaxes(tickangle=30, tickfont=dict(size=10))
         show_chart(style_fig(fig, theme), key=f"{key_prefix}-{by_col}-bars")
@@ -872,11 +911,11 @@ with tabs[6]:
             RespOnly=("_RespondedNotClosed_Flag", "sum"),
         ).reset_index()
         fig2 = go.Figure()
-        mc = metric_colors
-        fig2.add_trace(go.Scatter(x=series["Date"], y=series["Raised"], mode="lines", name="Raised", line=dict(color=mc["Total"])))
-        fig2.add_trace(go.Scatter(x=series["Date"], y=series["Resolved"], mode="lines", name="Resolved", line=dict(color=mc["Resolved"])))
-        fig2.add_trace(go.Scatter(x=series["Date"], y=series["R2C"], mode="lines", name="Rejected→Closed", line=dict(color=mc["R2C"])))
-        fig2.add_trace(go.Scatter(x=series["Date"], y=series["RespOnly"], mode="lines", name="Responded-not-Closed", line=dict(color=mc["RespOnly"])))
+        line_cols = generate_brand_sequence(4)  # ensure 4 distinct brand colours
+        fig2.add_trace(go.Scatter(x=series["Date"], y=series["Raised"],   mode="lines", name="Raised",               line=dict(color=line_cols[0])))
+        fig2.add_trace(go.Scatter(x=series["Date"], y=series["Resolved"], mode="lines", name="Resolved",             line=dict(color=line_cols[1])))
+        fig2.add_trace(go.Scatter(x=series["Date"], y=series["R2C"],      mode="lines", name="Rejected→Closed",      line=dict(color=line_cols[2])))
+        fig2.add_trace(go.Scatter(x=series["Date"], y=series["RespOnly"], mode="lines", name="Responded-not-Closed", line=dict(color=line_cols[3])))
         fig2.update_layout(title="Daily Flow — Raised vs Resolved vs R→C vs Responded-not-Closed")
         show_chart(style_fig(fig2, theme), key="tab6-lines")
     else:
@@ -920,21 +959,23 @@ with tabs[7]:
             f"Effective: {_fmt_ts(r.get('_EffectiveResolutionDT'))}"
         )
 
-        # Event strip (brand colours)
+        # Event strip (unique brand colours)
         events = []
-        for name, col, color in [
-            ("Raised", "_RaisedOnDT", GREY),
-            ("Responded", "_RespondedOnDT", BLUE),
-            ("Rejected", "_RejectedOnDT", GREY),
-            ("Closed", "_ClosedOnDT", BLACK),
-            ("Effective", "_EffectiveResolutionDT", BLUE),
-            ("Deadline", "_DeadlineDT", GREY),
+        for name, col in [
+            ("Raised", "_RaisedOnDT"),
+            ("Responded", "_RespondedOnDT"),
+            ("Rejected", "_RejectedOnDT"),
+            ("Closed", "_ClosedOnDT"),
+            ("Effective", "_EffectiveResolutionDT"),
+            ("Deadline", "_DeadlineDT"),
         ]:
             ts = r.get(col)
             if pd.notna(ts):
-                events.append(dict(name=name, ts=pd.to_datetime(ts), color=color))
+                events.append(dict(name=name, ts=pd.to_datetime(ts)))
         if events:
-            evdf = pd.DataFrame(events).sort_values("ts")
+            event_names = [e["name"] for e in events]
+            event_map = brand_map_for(event_names)
+            evdf = pd.DataFrame([dict(name=e["name"], ts=e["ts"], color=event_map[e["name"]]) for e in events]).sort_values("ts")
             fig_ev = go.Figure()
             fig_ev.add_trace(go.Scatter(
                 x=evdf["ts"], y=[0]*len(evdf),
@@ -958,15 +999,16 @@ with tabs[7]:
             segs.append(dict(segment="Raised→Effective", start=pd.to_datetime(rs), finish=pd.to_datetime(ef)))
         if segs:
             tdf = pd.DataFrame(segs)
+            seg_map = brand_map_for([s["segment"] for s in segs])
             fig_tl = px.timeline(tdf, x_start="start", x_end="finish", y="segment",
-                                 color="segment", color_discrete_sequence=THEMES[theme]["palette"])
+                                 color="segment", color_discrete_map=seg_map)
             fig_tl.update_yaxes(autorange="reversed")
             fig_tl.update_layout(title="Gantt (segments)", height=250, showlegend=False)
             show_chart(style_fig(fig_tl, theme), key="nc-gantt")
         else:
             st.info("Not enough timestamps to render Gantt segments.")
 
-        # Status step chart
+        # Status step chart (single series; brand line OK)
         steps = []
         if pd.notna(rs): steps.append(("Raised", pd.to_datetime(rs), 0))
         if pd.notna(rp) and pd.notna(rs) and rp >= rs: steps.append(("Responded", pd.to_datetime(rp), 1))
@@ -1002,10 +1044,11 @@ with tabs[7]:
             if ef_hours is not None: bars.append(("Actual", max(0, ef_hours)))
             if bars:
                 bdf = pd.DataFrame(bars, columns=["Metric","Hours"])
+                bmap = brand_map_for(bdf["Metric"].tolist())
                 fig_b = px.bar(bdf, x="Hours", y="Metric", orientation="h",
                                title="SLA — Deadline vs Actual (hours)",
                                color="Metric",
-                               color_discrete_map={"Deadline": GREY, "Actual": BLACK},
+                               color_discrete_map=bmap,
                                text_auto=True)
                 show_chart(style_fig(fig_b, theme), key="nc-sla-bullet")
         else:
@@ -1055,9 +1098,10 @@ with tabs[8]:
                 agg = agg.sort_values("Count", ascending=False).head(max_nodes)
             agg = unique_columns(agg)
             path_cols = [c for c in agg.columns if c.startswith("Level_")]
+            palette_big = sample_brand_gradient(64)  # generous set of unique brand colours
             fig_t = px.treemap(
                 agg, path=path_cols, values="Count",
-                color_discrete_sequence=THEMES[theme]["palette"]
+                color_discrete_sequence=palette_big
             )
             fig_t.update_layout(title="Location / Reference — Treemap (aggregated)")
             show_chart(style_fig(fig_t, theme), key="sk-treemap")
@@ -1081,7 +1125,7 @@ with tabs[8]:
 # ---------- NC Table ----------
 with tabs[9]:
     st.header("NC Table")
-    st.caption("Styled table with row shading by Current Status (brand colours).")
+    st.caption("Styled table with row shading by Current Status (brand colours, unique per status).")
     shade = st.toggle("Enable row shading", value=False, key="tbl-shade")
 
     display_cols = [c for c in [
@@ -1109,7 +1153,7 @@ with tabs[9]:
         view = df_filtered[display_cols]
         if shade:
             try:
-                st.write(style_status_rows(view.head(1500), theme).to_html(), unsafe_allow_html=True)
+                st.write(style_status_rows(view.head(1500), STATUS_COLOR_MAP).to_html(), unsafe_allow_html=True)
             except Exception:
                 st.dataframe(view.head(1500), use_container_width=True)
         else:
