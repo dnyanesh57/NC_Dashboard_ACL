@@ -106,13 +106,6 @@ div#sj-titlebar p {{ margin-top: 4px; opacity: .9; }}
 </div>
 """, unsafe_allow_html=True)
 
-# Render (works with an existing container `t`, otherwise falls back to st)
-try:
-    t.markdown(hdr_html, unsafe_allow_html=True)  # type: ignore
-except NameError:
-    st.markdown(hdr_html, unsafe_allow_html=True)
-
-
 # ---------- Brand-aware colour helpers ----------
 def _hex_to_rgb(h: str) -> tuple[int,int,int]:
     h = h.lstrip("#")
