@@ -5,6 +5,7 @@
 # - Removed multi-theme selector and non-brand colours
 # - All charts & states re-mapped to brand colours
 # - Business logic identical to V2.5
+# - NEW: universal loader (CSV/XLSX, encodings, GitHub demo), safe col normalization, dedupe
 # --------------------------------------------------------------
 # Run:
 #   pip install -U streamlit plotly pandas numpy openpyxl
@@ -13,6 +14,7 @@
 from typing import Optional, Any, Tuple, List
 import datetime as dt
 import re
+import io  # NEW
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -187,7 +189,7 @@ def humanize_td(td: pd.Series) -> pd.Series:
         parts = []
         if days: parts.append(f"{days}d")
         if hours: parts.append(f"{hours}h")
-        if minutes: parts.append(f"{minutes}m")
+        if minutes: parts.append(f"{minutes}m}")
         return " ".join(parts) if parts else "0m"
     return td.apply(_fmt)
 
@@ -340,6 +342,48 @@ def metrics_summary(df: pd.DataFrame, theme_name: str):
     with t5: st.metric("Median Responding Time", _fmt(median_response))
     with t6: st.metric("SLA Met Rate", f"{sla_rate:.1f}%" if pd.notna(sla_rate) else "—")
 
+# ----------------------------- Load data ----------------------------
+def normalize_colname(c: str) -> str:
+    """Keep official column labels intact, but clean whitespace and unicode quirks."""
+    s = str(c).replace("\u2013", "-").replace("\u2014", "-").replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
+    """
+    Robust reader:
+      - If file is None: pull demo CSV from GitHub
+      - Else: try Excel, else CSV with multiple encodings
+      - Normalize column names and drop duplicate columns
+    """
+    if file is None:
+        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
+        try:
+            df = pd.read_csv(default_path)
+        except Exception:
+            st.error("No file uploaded and demo CSV not found in working directory.")
+            st.stop()
+    else:
+        name = getattr(file, "name", "uploaded.csv").lower()
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            df = pd.read_excel(file)
+        else:
+            # Try a few encodings for CSV
+            for enc in [None, "utf-8", "utf-8-sig", "latin-1"]:
+                try:
+                    file.seek(0)
+                    df = pd.read_csv(file, encoding=enc)
+                    break
+                except Exception:
+                    continue
+            else:
+                st.error("Could not read the uploaded CSV with common encodings.")
+                st.stop()
+    # Clean & dedupe headers safely (does NOT change label wording)
+    df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
+    df = df.loc[:, ~pd.Series(df.columns).duplicated().values]
+    return df
+
 # ---------- Sidebar (brand-locked) ----------
 with st.sidebar:
     st.title("🧭 Digital NC Register")
@@ -347,9 +391,8 @@ with st.sidebar:
     # Optional logo
     logo_url = st.text_input("Logo URL (optional)", value="")
     st.markdown("#### Data Source")
-    DEFAULT_PATH = r"C:\Users\Lenovo\Downloads\CSV-INSTRUCTION-DETAIL-REPORT-08-28-2025-08-33-46.csv"
-    uploaded = st.file_uploader("Upload Issue Register CSV", type=["csv"], key="uploader")
-    use_default = st.toggle("Use default (auto-loaded)", value=True, key="use-default")
+    uploaded = st.file_uploader("Upload Issue Register (CSV / XLSX)", type=["csv", "xlsx", "xls"], key="uploader")  # UPDATED
+    use_default = st.toggle("Use default (demo from GitHub)", value=True, key="use-default")  # UPDATED label
 
 # Apply brand defaults for Plotly
 px.defaults.template = THEMES[theme]["template"]
@@ -411,31 +454,20 @@ st.markdown(
 
 # ---------- Data load (cached) ----------
 @st.cache_data(show_spinner=False)
-def read_csv_bytes(b: bytes) -> pd.DataFrame:
-    from io import BytesIO
-    return pd.read_csv(BytesIO(b))
-
-@st.cache_data(show_spinner=False)
-def read_csv_path(p: str) -> pd.DataFrame:
-    return pd.read_csv(p)
-
-@st.cache_data(show_spinner=False)
 def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
+    # Keep official labels, but trim surrounding spaces if any slipped through
     df.columns = [c.strip() for c in df.columns]
     return add_derived_columns(df)
 
+# Use new loader (uploaded or demo)
 if uploaded is not None:
-    df_raw = read_csv_bytes(uploaded.getvalue())
+    df_raw = load_data(uploaded)
 elif use_default:
-    try:
-        df_raw = read_csv_path(DEFAULT_PATH)
-        st.info(f"Loaded default file: `{DEFAULT_PATH}`")
-    except Exception as e:
-        st.error(f"Unable to load default file. Please upload. Error: {e}")
-        st.stop()
+    df_raw = load_data(None)
+    st.info("Loaded demo CSV from GitHub.")
 else:
-    st.warning("Please upload a CSV to continue.")
+    st.warning("Please upload a CSV/XLSX to continue.")
     st.stop()
 
 df = preprocess(df_raw)
