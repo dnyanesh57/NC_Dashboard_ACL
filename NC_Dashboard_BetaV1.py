@@ -1,14 +1,13 @@
-# digiqc_dashboard_NC_V2.6_SJCPL.py
+# digiqc_dashboard_NC_V2.7_SJCPL.py
 # Digital NC Register — Streamlit (SJCPL Brand)
+# - Keeps V2.6 working framework intact
+# - Fixes fullscreen legend/title overlap (legend docked below + safe margins)
+# - Adds donuts, sunburst, heatmaps, Pareto, backlog area, calendar heatmap, stacked mixes, bubble chart
 # - Brand-locked palette: Blue(#00AEDA), Black(#000000), Grey(#939598), White(#FFFFFF)
-# - Roboto everywhere (UI + Plotly)
-# - No multi-theme; brand-only colours with gradient variants
-# - Business logic from V2.5 + Status-change tab
-# - Robust load_data() as requested
 # --------------------------------------------------------------
 # Run:
 #   pip install -U streamlit plotly pandas numpy openpyxl
-#   streamlit run digiqc_dashboard_NC_V2.6_SJCPL.py
+#   streamlit run digiqc_dashboard_NC_V2.7_SJCPL.py
 
 from typing import Optional, Any, Tuple, List
 import datetime as dt
@@ -55,24 +54,20 @@ def distinct_brand_colors(n: int) -> List[str]:
        Ensures the 4 base swatches appear at most once each."""
     anchors = [BLUE, BLACK, GREY, WHITE]
     seq: List[str] = []
-    # Start with at most one of each anchor (avoid WHITE first for bars)
     order = [BLUE, BLACK, GREY, WHITE]
     for c in order:
         if len(seq) < n:
             seq.append(c)
     if len(seq) >= n:
         return seq[:n]
-    # Then fill using gradients between anchors
     legs = [(BLUE, BLACK), (BLACK, GREY), (GREY, WHITE), (WHITE, BLUE)]
     needed = n - len(seq)
-    # Distribute points across legs
-    steps_per_leg = max(2, int(np.ceil(needed / len(legs))) + 1)  # +1 so we get interior points
+    steps_per_leg = max(2, int(np.ceil(needed / len(legs))) + 1)
     extras: List[str] = []
     for a,b in legs:
-        for i in range(1, steps_per_leg):  # interior points only (avoid repeating anchors)
+        for i in range(1, steps_per_leg):
             t = i/steps_per_leg
             extras.append(blend(a,b,t))
-    # Remove any accidental dupes and already used anchors
     seen = set(x.upper() for x in seq)
     out = [c for c in extras if c.upper() not in seen]
     seq.extend(out[:needed])
@@ -116,19 +111,48 @@ THEMES = {
 }
 theme = "SJCPL"
 
+# ---------- Plotly styling (fullscreen-safe legend) ----------
 def style_fig(fig, theme_name: str):
     fig.update_layout(
         template=THEMES[theme_name]["template"],
         font=dict(family="Roboto, Arial, sans-serif", size=12, color=BLACK),
-        legend=dict(title='', orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
-        hoverlabel=dict(bgcolor="rgba(255,255,255,0.95)", font=dict(family="Roboto, Arial, sans-serif", color=BLACK)),
+
+        # Legend docked below the plot area — avoids title/subtitle overlap in fullscreen
+        legend=dict(
+            title='',
+            orientation="h",
+            yanchor="top",
+            y=-0.28,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(255,255,255,0.95)",
+            bordercolor="rgba(0,0,0,0.08)",
+            borderwidth=1
+        ),
+
+        hoverlabel=dict(bgcolor="rgba(255,255,255,0.95)", 
+                        font=dict(family="Roboto, Arial, sans-serif", color=BLACK)),
         bargap=0.22,
-        margin=dict(l=10, r=10, t=80, b=30)
+
+        # Extra headroom/footroom for fullscreen
+        margin=dict(l=10, r=10, t=90, b=120),
+        autosize=True
     )
-    fig.update_traces(marker_line_width=0.5, marker_line_color="rgba(0,0,0,0.20)")
+
+    # Axes & grids
     fig.update_xaxes(showgrid=True, gridcolor="#ECEFF1", zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor="#ECEFF1", zeroline=False)
+
+    # ✅ Only apply marker line to trace types that actually support it
+    _safe_types = ("bar", "histogram", "scatter", "pie", "box", "violin", "treemap", "sunburst")
+    for t in _safe_types:
+        fig.update_traces(
+            selector=dict(type=t),
+            marker=dict(line=dict(width=0.5, color="rgba(0,0,0,0.20)"))
+        )
+
     return fig
+
 
 def show_chart(fig, key: str):
     try:
@@ -193,7 +217,7 @@ def combine_datetime(date_series: pd.Series, time_series: pd.Series) -> pd.Serie
     t = np.where((t == "") & has_date, "00:00:00", t)
     full = np.where(has_date, d + " " + t, "")
     out = pd.to_datetime(full, format="%Y-%m-%d %H:%M:%S", errors="coerce")
-    return out
+    return out  # keep naive
 
 # ---------- Business rules ----------
 def _safe_get(df: pd.DataFrame, col: str) -> pd.Series:
@@ -228,7 +252,57 @@ def style_status_rows(df: pd.DataFrame, theme_name: str) -> Styler:
         bg = status_map.get(status, WHITE)
         txt = WHITE if bg in (BLACK, GREY) else BLACK
         return [f"background-color: {bg}; color: {txt};"] * len(row)
-    return df.style.apply(highlight, axis=1)
+    try:
+        return df.style.apply(highlight, axis=1)
+    except Exception:
+        return df  # fallback
+
+def ensure_last_status_change(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee _LastStatusChangeDT/_LastStatusEvent exist, computing from available timestamps."""
+    def ensure_series(df, out_col, dcol, tcol):
+        if out_col not in df.columns:
+            if dcol in df.columns or tcol in df.columns:
+                df[out_col] = combine_datetime(_safe_get(df, dcol), _safe_get(df, tcol))
+            else:
+                df[out_col] = pd.NaT
+        return df
+
+    # Make sure the base datetime columns exist
+    df = ensure_series(df, "_RaisedOnDT",    "Raised On Date",   "Raised On Time")
+    df = ensure_series(df, "_RespondedOnDT", "Responded On Date","Responded On Time")
+    df = ensure_series(df, "_RejectedOnDT",  "Rejected On Date", "Rejected On Time")
+    df = ensure_series(df, "_ClosedOnDT",    "Closed On Date",   "Closed On Time")
+
+    # Effective resolution (closed else valid responded>raised)
+    if "_EffectiveResolutionDT" not in df.columns:
+        eff = df["_ClosedOnDT"].copy()
+        mask_eff = eff.isna() & df["_RespondedOnDT"].notna() & df["_RaisedOnDT"].notna() & (df["_RespondedOnDT"] > df["_RaisedOnDT"])
+        eff.loc[mask_eff] = df.loc[mask_eff, "_RespondedOnDT"]
+        df["_EffectiveResolutionDT"] = eff
+
+    # Compute last status change + event
+    ev_cols = ["_RespondedOnDT","_RejectedOnDT","_ClosedOnDT","_EffectiveResolutionDT"]
+    existing = [c for c in ev_cols if c in df.columns]
+    if existing:
+        sentinel = pd.Timestamp("1900-01-01 00:00:00")
+        evdf = df[existing].copy()
+        evdf_f = evdf.fillna(sentinel)
+        last_ts  = evdf_f.max(axis=1)
+        none_mask = evdf.notna().sum(axis=1) == 0
+        last_ts  = last_ts.mask(none_mask, pd.NaT)
+        last_col = evdf_f.idxmax(axis=1)
+        rev = {
+            "_RespondedOnDT":"Responded",
+            "_RejectedOnDT":"Rejected",
+            "_ClosedOnDT":"Closed",
+            "_EffectiveResolutionDT":"Effective",
+        }
+        df["_LastStatusChangeDT"] = last_ts
+        df["_LastStatusEvent"]    = last_col.map(rev).where(~none_mask, None)
+    else:
+        df["_LastStatusChangeDT"] = pd.NaT
+        df["_LastStatusEvent"]    = None
+    return df
 
 # ---------- Derived columns (effective closure + flags + last status change) ----------
 def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -325,19 +399,28 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         evdf = df[available].copy()
         evdf_f = evdf.fillna(sentinel)
         last_ts = evdf_f.max(axis=1)
-        # Where all were NaT -> keep NaT
         none_mask = evdf.notna().sum(axis=1) == 0
         last_ts = last_ts.mask(none_mask, pd.NaT)
-        # Which column produced the max?
         last_col = evdf_f.idxmax(axis=1)
         last_col = last_col.mask(none_mask, None)
-        # Map back to label
         rev = {v: k for k, v in event_cols.items()}
         df["_LastStatusChangeDT"] = last_ts
         df["_LastStatusEvent"] = last_col.map(rev).where(~none_mask, None)
     else:
         df["_LastStatusChangeDT"] = pd.NaT
         df["_LastStatusEvent"] = None
+
+    # -------- Calendar splits for extra timelines --------
+    if df["_RaisedOnDT"].notna().any():
+        df["_RaisedDate"] = df["_RaisedOnDT"].dt.date
+        df["_RaisedWeek"] = df["_RaisedOnDT"].dt.to_period("W").astype(str)
+        df["_RaisedDOW"]  = df["_RaisedOnDT"].dt.day_name()
+        df["_RaisedHour"] = df["_RaisedOnDT"].dt.hour
+    else:
+        df["_RaisedDate"] = np.nan
+        df["_RaisedWeek"] = np.nan
+        df["_RaisedDOW"]  = np.nan
+        df["_RaisedHour"] = np.nan
 
     return df
 
@@ -652,12 +735,46 @@ with tabs[0]:
         else:
             st.info("No data for Computed Closure Time.")
 
-# ---------- Status (NEW) ----------
+    # ---- Added Overview visuals (donuts + sunburst) ----
+    st.subheader("More Overview Visuals")
+    cA, cB, cC = st.columns(3)
+    with cA:
+        if "SLA Met" in df_filtered.columns and len(df_filtered):
+            work = df_filtered.copy()
+            work["SLA State"] = work["SLA Met"].map({True: "Met", False: "Missed"}).fillna("Unknown")
+            vc = work["SLA State"].value_counts().rename_axis("SLA State").reset_index(name="Count")
+            fig = px.pie(vc, names="SLA State", values="Count", hole=0.6,
+                         color="SLA State", color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig.update_layout(title="SLA — Met vs Missed vs Unknown")
+            show_chart(style_fig(fig, theme), key="ov-sla-donut")
+    with cB:
+        if "_R2C_Flag" in df_filtered.columns and len(df_filtered):
+            temp = df_filtered.copy()
+            temp["R2C State"] = np.where(temp["_R2C_Flag"] == 1, "R2C", "Non-R2C")
+            vc = temp["R2C State"].value_counts().rename_axis("R2C").reset_index(name="Count")
+            fig = px.pie(vc, names="R2C", values="Count", hole=0.6,
+                         color="R2C", color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig.update_layout(title="R2C — Overall Split (inferred)")
+            show_chart(style_fig(fig, theme), key="ov-r2c-donut")
+    with cC:
+        if all(c in df_filtered.columns for c in ["Type L0","Type L1","Type L2"]):
+            sb = df_filtered.copy()
+            for c in ["Type L0","Type L1","Type L2"]:
+                sb[c] = sb[c].fillna("—").astype(str)
+            fig = px.sunburst(sb, path=["Type L0","Type L1","Type L2"],
+                              color="Type L0", color_discrete_sequence=distinct_brand_colors(sb["Type L0"].nunique()+2))
+            fig.update_layout(title="Activity Hierarchy — L0 / L1 / L2")
+            show_chart(style_fig(fig, theme), key="ov-sunburst")
+
+# ---------- Status (extended) ----------
 with tabs[1]:
     st.header("Status")
     st.caption("See which NCs changed status Today, in the Last 3 days, or in This week.")
 
-    # Period selector
+    # Ensure required columns exist (robust even if preprocess didn’t run)
+    df_filtered = ensure_last_status_change(df_filtered)
+    last_change = pd.to_datetime(df_filtered["_LastStatusChangeDT"], errors="coerce")
+
     period = st.selectbox("Show changes from", ["Today", "Last 3 days", "This week", "All"], index=0, key="status-period")
 
     now = pd.Timestamp.now()
@@ -665,29 +782,45 @@ with tabs[1]:
     start_of_week = today - pd.Timedelta(days=today.weekday())  # Monday
 
     if period == "Today":
-        m = df_filtered["_LastStatusChangeDT"].dt.normalize() == today
+        m = last_change.dt.normalize() == today
         window_label = f"Today ({today.date()})"
     elif period == "Last 3 days":
         cutoff = today - pd.Timedelta(days=2)  # today + previous 2 = 3 days incl. today
-        m = df_filtered["_LastStatusChangeDT"] >= cutoff
+        m = last_change >= cutoff
         window_label = f"Last 3 days (since {cutoff.date()})"
     elif period == "This week":
-        m = df_filtered["_LastStatusChangeDT"] >= start_of_week
+        m = last_change >= start_of_week
         window_label = f"This week (since {start_of_week.date()})"
     else:
-        m = df_filtered["_LastStatusChangeDT"].notna()
+        m = last_change.notna()
         window_label = "All available"
 
-    changed = df_filtered.loc[m & df_filtered["_LastStatusChangeDT"].notna()].copy()
+    changed = df_filtered.loc[m & last_change.notna()].copy()
+
     count_changed = len(changed)
     total_in_scope = len(df_filtered)
 
-    c1,c2,c3 = st.columns(3)
+    c1,c2,c3,cx = st.columns(4)
     with c1: st.metric("NCs with Status Change", f"{count_changed}")
     with c2: st.metric("Window", window_label)
     with c3:
         pct = (count_changed/total_in_scope*100.0) if total_in_scope else 0.0
         st.metric("% of Filtered NCs", f"{pct:.1f}%")
+    with cx:
+        if count_changed and changed["_LastStatusChangeDT"].notna().any():
+            age_hrs = (now - changed["_LastStatusChangeDT"]).dt.total_seconds()/3600.0
+            med = np.nanmedian(age_hrs) if np.isfinite(age_hrs).any() else np.nan
+            st.metric("Median hrs since change", f"{med:.1f}" if pd.notna(med) else "—")
+
+    # KPIs for R2C & Responded-not-Closed within window
+    if count_changed:
+        k1,k2 = st.columns(2)
+        with k1:
+            if "_R2C_Flag" in changed.columns:
+                st.metric("R2C in window (inferred)", int(changed["_R2C_Flag"].sum()))
+        with k2:
+            if "_RespondedNotClosed_Flag" in changed.columns:
+                st.metric("Responded-not-Closed in window", int(changed["_RespondedNotClosed_Flag"].sum()))
 
     if count_changed == 0:
         st.info("No status changes found for the selected period and filters.")
@@ -695,7 +828,6 @@ with tabs[1]:
         # Bar: by Last Status Event
         evt_counts = (changed["_LastStatusEvent"].fillna("Unknown")
                       .value_counts().rename_axis("Event").reset_index(name="Count"))
-        # Distinct colour for each event (within brand gamut)
         evt_colors = {
             "Responded": BLUE,
             "Rejected": GREY,
@@ -740,6 +872,51 @@ with tabs[1]:
         fig_line.update_layout(title="Daily Status Changes", xaxis_title="", yaxis_title="Count")
         show_chart(style_fig(fig_line, theme), key="st-daily-line")
 
+        # --- Added daily breakdowns & age buckets ---
+        tmp = changed.copy()
+        tmp["Change Date"] = pd.to_datetime(tmp["_LastStatusChangeDT"]).dt.date
+
+        if "_LastStatusEvent" in tmp.columns:
+            ev_day = tmp.groupby(["Change Date","_LastStatusEvent"]).size().reset_index(name="Count")
+            fig_ev_day = px.bar(ev_day, x="Change Date", y="Count", color="_LastStatusEvent",
+                                color_discrete_sequence=distinct_brand_colors(ev_day["_LastStatusEvent"].nunique()+2))
+            fig_ev_day.update_layout(title="Per-day changes by Event")
+            show_chart(style_fig(fig_ev_day, theme), key="st-ev-perday")
+
+        if "Current Status" in tmp.columns:
+            st_day = tmp.groupby(["Change Date","Current Status"]).size().reset_index(name="Count")
+            fig_st_day = px.bar(st_day, x="Change Date", y="Count", color="Current Status",
+                                color_discrete_sequence=distinct_brand_colors(st_day["Current Status"].nunique()+2))
+            fig_st_day.update_layout(title="Per-day changes by Status")
+            show_chart(style_fig(fig_st_day, theme), key="st-status-perday")
+
+        if "Project Name" in tmp.columns:
+            top_p = tmp.groupby("Project Name").size().reset_index(name="Changes").sort_values("Changes", ascending=False).head(15)
+            fig_top = px.bar(top_p.sort_values("Changes"), x="Changes", y="Project Name", orientation="h",
+                             color_discrete_sequence=distinct_brand_colors(1), text_auto=True)
+            fig_top.update_layout(title="Top Projects — # of Changes")
+            show_chart(style_fig(fig_top, theme), key="st-top-projects")
+
+        if "_R2C_Flag" in tmp.columns and "Project Name" in tmp.columns:
+            r2 = tmp.groupby("Project Name")["_R2C_Flag"].sum().reset_index(name="R2C")
+            r2 = r2[r2["R2C"]>0].sort_values("R2C", ascending=False).head(15)
+            if len(r2):
+                fig_r2p = px.bar(r2, x="Project Name", y="R2C",
+                                 color_discrete_sequence=distinct_brand_colors(1), text_auto=True)
+                fig_r2p.update_layout(title="R2C in window — by Project")
+                show_chart(style_fig(fig_r2p, theme), key="st-r2c-proj")
+
+        if changed["_LastStatusChangeDT"].notna().any():
+            hours = (now - changed["_LastStatusChangeDT"]).dt.total_seconds()/3600.0
+            bins = [0, 8, 24, 72, 168, 1e9]; labels = ["≤8h","8–24h","1–3d","3–7d",">7d"]
+            buck = pd.cut(hours, bins=bins, labels=labels, right=True)
+            vc = pd.Series(buck).value_counts().reindex(labels).reset_index()
+            vc.columns = ["Age Bucket","Count"]
+            fig_age = px.bar(vc, x="Age Bucket", y="Count", color="Age Bucket",
+                             color_discrete_sequence=distinct_brand_colors(len(vc)), text_auto=True)
+            fig_age.update_layout(title="Age since last change — Buckets")
+            show_chart(style_fig(fig_age, theme), key="st-age-buckets")
+
         # Table of changed NCs
         st.subheader("Changed NCs")
         show_cols = [c for c in [
@@ -777,6 +954,26 @@ with tabs[2]:
                           color_discrete_sequence=distinct_brand_colors(melted["Metric"].nunique()))
         fig_proj.update_xaxes(tickangle=30, tickfont=dict(size=11))
         show_chart(style_fig(fig_proj, theme), key="tab1-project-bar")
+
+        # ---- Added: Stacked status mix (top N) ----
+        if "Current Status" in df_filtered.columns:
+            topN = min(20, len(grp))
+            top_projects = grp.sort_values("Total", ascending=False).head(topN)["Project Name"].astype(str).tolist()
+            small = df_filtered[df_filtered["Project Name"].astype(str).isin(top_projects)].copy()
+            small["Current Status"] = small["Current Status"].fillna("—").astype(str)
+            stack = small.groupby(["Project Name","Current Status"]).size().reset_index(name="Count")
+            fig_stack = px.bar(stack, x="Project Name", y="Count", color="Current Status", text_auto=True,
+                               color_discrete_sequence=distinct_brand_colors(stack["Current Status"].nunique()+2))
+            fig_stack.update_layout(title="Top Projects — Status Mix (stacked)")
+            fig_stack.update_xaxes(tickangle=30, tickfont=dict(size=11))
+            show_chart(style_fig(fig_stack, theme), key="proj-status-stacked")
+
+        # ---- Added: SLA% vs Resolved (bubble) ----
+        if "SLA_Met" in grp.columns:
+            fig_sc = px.scatter(grp, x="SLA_Met", y="Resolved", size="Total", size_max=28,
+                                hover_name="Project Name", color_discrete_sequence=distinct_brand_colors(1))
+            fig_sc.update_layout(title="Project — SLA% vs Resolved")
+            show_chart(style_fig(fig_sc, theme), key="proj-sla-scatter")
     else:
         st.info("Column 'Project Name' not found.")
 
@@ -823,6 +1020,68 @@ with tabs[3]:
                                     color_discrete_sequence=distinct_brand_colors(1))
             show_chart(style_fig(fig_resp_scope, theme), key="tab2-responly-assignee")
 
+    # ---- Added Per-project snapshots (donuts + distribution + heatmap) ----
+    st.subheader("Per-project Snapshots")
+    projects = sorted(df_filtered.get("Project Name", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+    sel_proj = st.selectbox("Select a project", ["(All)"]+projects, index=0, key="pe-proj")
+    df_scope = df_filtered if sel_proj=="(All)" else df_filtered[df_filtered["Project Name"].astype(str)==sel_proj]
+
+    s1,s2,s3 = st.columns(3)
+    with s1:
+        if "Current Status" in df_scope.columns and len(df_scope):
+            vc = df_scope["Current Status"].fillna("—").astype(str).value_counts().reset_index()
+            vc.columns = ["Current Status","Count"]
+            fig = px.pie(vc, names="Current Status", values="Count", hole=0.6,
+                         color="Current Status", color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig.update_layout(title="Status")
+            show_chart(style_fig(fig, theme), key="pe-status-donut")
+    with s2:
+        who = "Responded By" if "Responded By" in df_scope.columns else ("Assigned Team User" if "Assigned Team User" in df_scope.columns else None)
+        if who:
+            vc = df_scope[who].fillna("—").astype(str).value_counts().reset_index()
+            vc.columns = [who, "Count"]
+            fig = px.pie(vc, names=who, values="Count", hole=0.6,
+                         color=who, color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig.update_layout(title="Inspectors / Responders")
+            show_chart(style_fig(fig, theme), key="pe-inspectors")
+    with s3:
+        if "Closed By" in df_scope.columns:
+            vc = df_scope["Closed By"].fillna("—").astype(str).value_counts().reset_index()
+            vc.columns = ["Closed By","Count"]
+            fig = px.pie(vc, names="Closed By", values="Count", hole=0.6,
+                         color="Closed By", color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig.update_layout(title="Approvers / Closers")
+            show_chart(style_fig(fig, theme), key="pe-closers")
+
+    d1,d2 = st.columns(2)
+    with d1:
+        s = pd.to_numeric(df_scope["Computed Closure Time (Hrs)"], errors="coerce")
+        s = s[(s >= 0) & s.notna()]
+        if len(s):
+            fig = px.box(y=s, points="suspectedoutliers")
+            fig.update_traces(showlegend=False, marker_color=distinct_brand_colors(1)[0])
+            fig.update_layout(title="Closure Time (hrs) — distribution")
+            show_chart(style_fig(fig, theme), key="pe-close-box")
+    with d2:
+        x = pd.to_numeric(df_scope["Computed Closure Time (Hrs)"], errors="coerce")
+        y = pd.to_numeric(df_scope["Total Cost"], errors="coerce") if "Total Cost" in df_scope.columns else pd.Series(index=df_scope.index, dtype=float)
+        mask = x.notna() & y.notna() & (x >= 0) & (y >= 0)
+        if mask.any():
+            fig = px.scatter(df_scope[mask], x="Computed Closure Time (Hrs)", y="Total Cost",
+                             hover_data=["Reference ID"] if "Reference ID" in df_scope.columns else None,
+                             color_discrete_sequence=distinct_brand_colors(1))
+            fig.update_layout(title="Closure time vs Total Cost")
+            show_chart(style_fig(fig, theme), key="pe-close-cost")
+
+    if "Type L1" in df_scope.columns and "Current Status" in df_scope.columns:
+        a = df_scope[["Type L1","Current Status"]].copy().fillna("—").astype(str)
+        pv = pd.pivot_table(a, index="Type L1", columns="Current Status", aggfunc=len, fill_value=0)
+        if pv.size:
+            fig = px.imshow(pv.values, x=pv.columns.astype(str), y=pv.index.astype(str),
+                            labels=dict(x="Current Status", y="Type L1", color="Count"), aspect="auto")
+            fig.update_layout(title="Heatmap — Type L1 vs Status")
+            show_chart(style_fig(fig, theme), key="pe-heatmap-l1")
+
 # ---------- Tower-Wise ----------
 with tabs[4]:
     st.header("Tower-Wise")
@@ -843,6 +1102,26 @@ with tabs[4]:
                            color_discrete_sequence=distinct_brand_colors(melted["Metric"].nunique()))
         fig_tower.update_xaxes(tickangle=30, tickfont=dict(size=11))
         show_chart(style_fig(fig_tower, theme), key="tab3-tower-group")
+
+        # ---- Added: Stacked status per tower + heatmap ----
+        if "Current Status" in df_filtered.columns:
+            top_t = grp.sort_values("Total", ascending=False).head(15)[tower_col].astype(str).tolist()
+            small = df_filtered[df_filtered[tower_col].astype(str).isin(top_t)].copy()
+            small["Current Status"] = small["Current Status"].fillna("—").astype(str)
+            stack = small.groupby([tower_col, "Current Status"]).size().reset_index(name="Count")
+            fig2 = px.bar(stack, x=tower_col, y="Count", color="Current Status", text_auto=True,
+                          color_discrete_sequence=distinct_brand_colors(stack["Current Status"].nunique()+2))
+            fig2.update_layout(title="Top Towers — Status mix (stacked)")
+            show_chart(style_fig(fig2, theme), key="tw-status-stacked")
+
+        if "Type L2" in df_filtered.columns:
+            a = df_filtered[[tower_col, "Type L2"]].copy().fillna("—").astype(str)
+            pv = pd.pivot_table(a, index=tower_col, columns="Type L2", aggfunc=len, fill_value=0)
+            if pv.size:
+                fig = px.imshow(pv.values, x=pv.columns.astype(str), y=pv.index.astype(str),
+                                labels=dict(x="Type L2", y=tower_col, color="Count"), aspect="auto")
+                fig.update_layout(title="Heatmap — Tower vs Type L2")
+                show_chart(style_fig(fig, theme), key="tw-heatmap")
     else:
         st.info("Column 'Location L1' not found.")
 
@@ -913,6 +1192,16 @@ with tabs[5]:
                                title="Median CLOSE-after-REJECTION (hours) — by Assignee (strict)",
                                color_discrete_sequence=distinct_brand_colors(1))
             show_chart(style_fig(fig_u_med, theme), key="tab4-u-med")
+
+        # ---- Added: Bubble — workload vs median close (bubble ~ Resolved) ----
+        small = usr.copy()
+        small = small[small["Total"] > 0]
+        if len(small):
+            fig_bub = px.scatter(small, x="Median_Close_Hrs", y="Total", size="Resolved",
+                                 hover_name="Assigned Team User", size_max=30,
+                                 color_discrete_sequence=distinct_brand_colors(1))
+            fig_bub.update_layout(title="Users — Median Close (hrs) vs Total (bubble ~ Resolved)")
+            show_chart(style_fig(fig_bub, theme), key="uw-bubble")
     else:
         st.info("Column 'Assigned Team User' not found.")
 
@@ -981,7 +1270,41 @@ with tabs[6]:
         if "Tag 2" in df_filtered.columns:
             grouped_measures("Tag 2", "tab5-tag2", show_ratio=True, topn=20)
 
-# ---------- Timelines (light) ----------
+    # ---- Added: Pareto + extra heatmap + sunburst ----
+    st.subheader("Pareto & Heatmaps")
+
+    if "Type L0" in df_filtered.columns:
+        agg = df_filtered["Type L0"].fillna("—").astype(str).value_counts().reset_index()
+        agg.columns = ["Type L0","Total"]
+        agg = agg.sort_values("Total", ascending=False).head(20)
+        if len(agg):
+            agg["Cum%"] = agg["Total"].cumsum() / agg["Total"].sum() * 100
+            figp = go.Figure()
+            figp.add_bar(x=agg["Type L0"], y=agg["Total"], name="Total", marker_color=distinct_brand_colors(1)[0])
+            figp.add_scatter(x=agg["Type L0"], y=agg["Cum%"], name="Cum %", yaxis="y2", mode="lines+markers",
+                             line=dict(width=2, color=distinct_brand_colors(2)[1]))
+            figp.update_layout(yaxis2=dict(overlaying="y", side="right", title="Cum %"), title="Type L0 — Pareto (Total)")
+            show_chart(style_fig(figp, theme), key="aw-pareto-l0")
+
+    if "Type L2" in df_filtered.columns and "Current Status" in df_filtered.columns:
+        a = df_filtered[["Type L2","Current Status"]].copy().fillna("—").astype(str)
+        pv = pd.pivot_table(a, index="Type L2", columns="Current Status", aggfunc=len, fill_value=0)
+        if pv.size:
+            fig = px.imshow(pv.values, x=pv.columns.astype(str), y=pv.index.astype(str), aspect="auto",
+                            labels=dict(x="Current Status", y="Type L2", color="Count"))
+            fig.update_layout(title="Heatmap — Type L2 vs Status")
+            show_chart(style_fig(fig, theme), key="aw-heatmap-l2")
+
+    if all(c in df_filtered.columns for c in ["Type L0","Type L1","Type L2"]):
+        sb = df_filtered.copy()
+        for c in ["Type L0","Type L1","Type L2"]:
+            sb[c] = sb[c].fillna("—").astype(str)
+        fig = px.sunburst(sb, path=["Type L0","Type L1","Type L2"],
+                          color="Type L0", color_discrete_sequence=distinct_brand_colors(sb["Type L0"].nunique()+2))
+        fig.update_layout(title="Sunburst — Activity Hierarchy")
+        show_chart(style_fig(fig, theme), key="aw-sunburst")
+
+# ---------- Timelines (extended) ----------
 with tabs[7]:
     st.header("Timelines (light)")
     if "_RaisedOnDT" in df_filtered.columns:
@@ -1001,6 +1324,26 @@ with tabs[7]:
         fig2.add_trace(go.Scatter(x=series["Date"], y=series["RespOnly"], mode="lines", name="Responded-not-Closed", line=dict(color=mc["RespOnly"])))
         fig2.update_layout(title="Daily Flow — Raised vs Resolved vs R→C vs Responded-not-Closed")
         show_chart(style_fig(fig2, theme), key="tab6-lines")
+
+        # ---- Added: Backlog area + Calendar heatmap ----
+        series["RaisedCum"]   = series["Raised"].cumsum()
+        series["ResolvedCum"] = series["Resolved"].cumsum()
+        series["Backlog"]     = series["RaisedCum"] - series["ResolvedCum"]
+        area = go.Figure()
+        area.add_trace(go.Scatter(x=series["Date"], y=series["Backlog"], name="Open Backlog", mode="lines",
+                                  fill="tozeroy", line=dict(width=0.5, color=distinct_brand_colors(1)[0])))
+        area.update_layout(title="Open Backlog (cumulative)")
+        show_chart(style_fig(area, theme), key="tl-backlog")
+
+        if df_filtered["_RaisedWeek"].notna().any() and df_filtered["_RaisedDOW"].notna().any():
+            cal = df_filtered.groupby(["_RaisedWeek","_RaisedDOW"]).size().reset_index(name="Count")
+            days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            cal["_RaisedDOW"] = pd.Categorical(cal["_RaisedDOW"], categories=days, ordered=True)
+            pv = cal.pivot(index="_RaisedDOW", columns="_RaisedWeek", values="Count").fillna(0)
+            fig = px.imshow(pv.values, x=pv.columns, y=pv.index, aspect="auto",
+                            labels=dict(x="Week", y="Day", color="Raised"))
+            fig.update_layout(title="Calendar Heatmap — Raised (Week × DOW)")
+            show_chart(style_fig(fig, theme), key="tl-cal-heatmap")
     else:
         st.info("No Raised On timestamps available.")
 
@@ -1096,9 +1439,9 @@ with tabs[8]:
         if pd.notna(rj) and (not steps or pd.to_datetime(rj) >= steps[-1][1]): steps.append(("Rejected", pd.to_datetime(rj), 2))
         cl = r.get("_ClosedOnDT")
         if pd.notna(cl): steps.append(("Closed", pd.to_datetime(cl), 3))
-        ef = r.get("_EffectiveResolutionDT")
-        if pd.notna(ef) and (not cl or pd.to_datetime(ef) != pd.to_datetime(cl)):
-            steps.append(("Effective", pd.to_datetime(ef), 4))
+        ef2 = r.get("_EffectiveResolutionDT")
+        if pd.notna(ef2) and (not cl or pd.to_datetime(ef2) != pd.to_datetime(cl)):
+            steps.append(("Effective", pd.to_datetime(ef2), 4))
         if steps:
             xs = [t[1] for t in steps]
             ys = [t[2] for t in steps]
@@ -1148,6 +1491,7 @@ with tabs[9]:
         treemap_enable = st.checkbox("Show Treemap", value=True, key="sk-enable")
         max_depth = st.slider("Max depth", 1, 6, 4, step=1, key="sk-depth")
         max_nodes = st.slider("Max nodes", 100, 5000, 800, step=100, help="Limit total rectangles for performance.", key="sk-nodes")
+        show_badges = st.checkbox("Show status badges in tiles", value=False, key="sk-badges")
 
         @st.cache_data(show_spinner=False)
         def build_levels(df_src: pd.DataFrame, col: str, depth: int) -> pd.DataFrame:
@@ -1173,14 +1517,41 @@ with tabs[9]:
             lv = build_levels(df_filtered, path_col, max_depth)
             grp_cols = [c for c in lv.columns if c.startswith("Level_")]
             agg = lv.groupby(grp_cols, dropna=False, as_index=False)["Count"].sum()
+
+            label_cols = []
+            if show_badges and "Current Status" in df_filtered.columns:
+                tmp = df_filtered.copy()
+                tmp["Current Status"] = tmp["Current Status"].fillna("—").astype(str)
+                for i in range(max_depth):
+                    tmp[f"Level_{i}"] = lv[f"Level_{i}"]
+                top_statuses = tmp["Current Status"].value_counts().head(2).index.tolist()
+                for status in top_statuses:
+                    badge = tmp[tmp["Current Status"] == status].groupby(grp_cols).size()
+                    badge = badge.reindex(agg.set_index(grp_cols).index, fill_value=0).values
+                    colname = f"{status}"
+                    agg[colname] = badge
+                    label_cols.append(colname)
+
             if len(agg) > max_nodes:
                 agg = agg.sort_values("Count", ascending=False).head(max_nodes)
             agg = unique_columns(agg)
             path_cols = [c for c in agg.columns if c.startswith("Level_")]
+
+            if show_badges and label_cols:
+                def _mk_label(row):
+                    name = [row[c] for c in path_cols if row[c]][-1] or "(root)"
+                    badges = " ".join([f"{k}:{int(row[k])}" for k in label_cols])
+                    return f"{name}<br><span style='font-size:10px;opacity:.8'>{badges}</span>"
+                labels = agg.apply(_mk_label, axis=1)
+            else:
+                labels = None
+
             fig_t = px.treemap(
                 agg, path=path_cols, values="Count",
                 color_discrete_sequence=distinct_brand_colors( max(3, len(path_cols)) )
             )
+            if labels is not None:
+                fig_t.update_traces(texttemplate=labels, hovertemplate="%{label}<br>Count=%{value}<extra></extra>")
             fig_t.update_layout(title="Location / Reference — Treemap (aggregated)")
             show_chart(style_fig(fig_t, theme), key="sk-treemap")
 
@@ -1237,4 +1608,4 @@ with tabs[10]:
         csv_data = view.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Download filtered table (CSV)", data=csv_data, file_name="digiqc_filtered.csv", mime="text/csv", key="dl-full-table")
 
-st.caption("© Digital Issue Dashboard — Streamlit (SJCPL Brand)")
+st.caption("© Digital Issue Dashboard — Streamlit (SJCPL Brand) — V2.7")
