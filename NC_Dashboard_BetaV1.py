@@ -189,7 +189,7 @@ def humanize_td(td: pd.Series) -> pd.Series:
         parts = []
         if days: parts.append(f"{days}d")
         if hours: parts.append(f"{hours}h")
-        if minutes: parts.append(f"{minutes}m}")
+        if minutes: parts.append(f"{minutes}m")
         return " ".join(parts) if parts else "0m"
     return td.apply(_fmt)
 
