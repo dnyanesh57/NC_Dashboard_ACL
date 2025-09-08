@@ -72,47 +72,6 @@ THEMES = {
 }
 theme = "SJCPL"
 
-# Plotly defaults (brand-only)
-px.defaults.template = "plotly_white"
-px.defaults.color_discrete_sequence = [
-    SJCPL["BLUE"], SJCPL["BLUE_700"], SJCPL["BLUE_200"],
-    SJCPL["GREY"], SJCPL["GREY_600"], SJCPL["GREY_200"], SJCPL["BLACK"]
-]
-
-# Brand continuous scale (Grey -> Blue)
-SJCPL_CONT = [
-    [0.00, SJCPL["WHITE"]],
-    [0.20, SJCPL["GREY_200"]],
-    [0.45, SJCPL["GREY"]],
-    [0.70, SJCPL["BLUE_200"]],
-    [1.00, SJCPL["BLUE"]],
-]
-# Inject Roboto + brand header
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
-html, body, [class*="css"], .stApp { font-family: 'Roboto', sans-serif; }
-:root {
-  --sj-blue: %s;
-  --sj-blue-dark: %s;
-  --sj-grey: %s;
-  --sj-grey-200: %s;
-  --sj-grey-600: %s;
-  --sj-black: %s;
-  --sj-white: %s;
-}
-.sj-header {
-  background: linear-gradient(90deg, var(--sj-black) 0%%, var(--sj-blue) 100%%);
-  padding: 14px 18px; border-radius: 14px; color: var(--sj-white);
-  margin: 6px 0 18px 0;
-}
-.sj-header h1 { margin: 0; font-weight: 800; letter-spacing: .2px; }
-.sj-header p { margin: 4px 0 0 0; opacity: .9; }
-</style>
-""" % (
-    SJCPL["BLUE"], SJCPL["BLUE_700"], SJCPL["GREY"],
-    SJCPL["GREY_200"], SJCPL["GREY_600"], SJCPL["BLACK"], SJCPL["WHITE"]
-), unsafe_allow_html=True)
 
 # ---------- Brand-aware colour helpers ----------
 def _hex_to_rgb(h: str) -> tuple[int,int,int]:
