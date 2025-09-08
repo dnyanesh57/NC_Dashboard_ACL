@@ -230,6 +230,53 @@ def style_status_rows(df: pd.DataFrame, theme_name: str) -> Styler:
         return [f"background-color: {bg}; color: {txt};"] * len(row)
     return df.style.apply(highlight, axis=1)
 
+def ensure_last_status_change(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee _LastStatusChangeDT/_LastStatusEvent exist, computing from available timestamps."""
+    def ensure_series(df, out_col, dcol, tcol):
+        if out_col not in df.columns:
+            if dcol in df.columns or tcol in df.columns:
+                df[out_col] = combine_datetime(_safe_get(df, dcol), _safe_get(df, tcol))
+            else:
+                df[out_col] = pd.NaT
+        return df
+
+    # Make sure the base datetime columns exist
+    df = ensure_series(df, "_RaisedOnDT",    "Raised On Date",   "Raised On Time")
+    df = ensure_series(df, "_RespondedOnDT", "Responded On Date","Responded On Time")
+    df = ensure_series(df, "_RejectedOnDT",  "Rejected On Date", "Rejected On Time")
+    df = ensure_series(df, "_ClosedOnDT",    "Closed On Date",   "Closed On Time")
+
+    # Effective resolution (closed else valid responded>raised)
+    if "_EffectiveResolutionDT" not in df.columns:
+        eff = df["_ClosedOnDT"].copy()
+        mask_eff = eff.isna() & df["_RespondedOnDT"].notna() & df["_RaisedOnDT"].notna() & (df["_RespondedOnDT"] > df["_RaisedOnDT"])
+        eff.loc[mask_eff] = df.loc[mask_eff, "_RespondedOnDT"]
+        df["_EffectiveResolutionDT"] = eff
+
+    # Compute last status change + event
+    ev_cols = ["_RespondedOnDT","_RejectedOnDT","_ClosedOnDT","_EffectiveResolutionDT"]
+    existing = [c for c in ev_cols if c in df.columns]
+    if existing:
+        sentinel = pd.Timestamp("1900-01-01 00:00:00")
+        evdf = df[existing].copy()
+        evdf_f = evdf.fillna(sentinel)
+        last_ts  = evdf_f.max(axis=1)
+        none_mask = evdf.notna().sum(axis=1) == 0
+        last_ts  = last_ts.mask(none_mask, pd.NaT)
+        last_col = evdf_f.idxmax(axis=1)
+        rev = {
+            "_RespondedOnDT":"Responded",
+            "_RejectedOnDT":"Rejected",
+            "_ClosedOnDT":"Closed",
+            "_EffectiveResolutionDT":"Effective",
+        }
+        df["_LastStatusChangeDT"] = last_ts
+        df["_LastStatusEvent"]    = last_col.map(rev).where(~none_mask, None)
+    else:
+        df["_LastStatusChangeDT"] = pd.NaT
+        df["_LastStatusEvent"]    = None
+    return df
+
 # ---------- Derived columns (effective closure + flags + last status change) ----------
 def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Ensure future/rolling-out fields exist
@@ -657,7 +704,10 @@ with tabs[1]:
     st.header("Status")
     st.caption("See which NCs changed status Today, in the Last 3 days, or in This week.")
 
-    # Period selector
+    # Ensure required columns exist (robust even if preprocess didn’t run)
+    df_filtered = ensure_last_status_change(df_filtered)
+    last_change = pd.to_datetime(df_filtered["_LastStatusChangeDT"], errors="coerce")
+
     period = st.selectbox("Show changes from", ["Today", "Last 3 days", "This week", "All"], index=0, key="status-period")
 
     now = pd.Timestamp.now()
@@ -665,20 +715,21 @@ with tabs[1]:
     start_of_week = today - pd.Timedelta(days=today.weekday())  # Monday
 
     if period == "Today":
-        m = df_filtered["_LastStatusChangeDT"].dt.normalize() == today
+        m = last_change.dt.normalize() == today
         window_label = f"Today ({today.date()})"
     elif period == "Last 3 days":
         cutoff = today - pd.Timedelta(days=2)  # today + previous 2 = 3 days incl. today
-        m = df_filtered["_LastStatusChangeDT"] >= cutoff
+        m = last_change >= cutoff
         window_label = f"Last 3 days (since {cutoff.date()})"
     elif period == "This week":
-        m = df_filtered["_LastStatusChangeDT"] >= start_of_week
+        m = last_change >= start_of_week
         window_label = f"This week (since {start_of_week.date()})"
     else:
-        m = df_filtered["_LastStatusChangeDT"].notna()
+        m = last_change.notna()
         window_label = "All available"
 
-    changed = df_filtered.loc[m & df_filtered["_LastStatusChangeDT"].notna()].copy()
+    changed = df_filtered.loc[m & last_change.notna()].copy()
+
     count_changed = len(changed)
     total_in_scope = len(df_filtered)
 
