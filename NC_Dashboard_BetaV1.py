@@ -71,37 +71,30 @@ THEMES = {
     }
 }
 theme = "SJCPL"
-# --- Brand H1 Header (drop this near the top, after color constants) ---
+# --- Brand H1 Header (no flicker, white title) ---
 APP_TITLE = "🧭 DigiQC — NC Insights Dashboard"
 APP_SUB   = "SJCPL visual theme · Roboto · Brand colors only"
 
 hdr_html = f"""
-<div class="sj-header">
-  <h1>{APP_TITLE}</h1>
-  <p>{APP_SUB}</p>
+<div class="sj-hero" style="background: linear-gradient(90deg, {BLACK} 0%, {BLUE} 100%) !important; padding: 14px 18px; border-radius: 14px; color: {WHITE}; margin: 6px 0 18px 0;">
+  <h1 class="sj-hero-title">{APP_TITLE}</h1>
+  <p class="sj-hero-sub">{APP_SUB}</p>
 </div>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
 html, body, [class*="css"], .stApp {{
   font-family: 'Roboto', sans-serif;
 }}
-:root {{
-  --sj-blue: {BLUE};
-  --sj-grey: {GREY};
-  --sj-black: {BLACK};
-  --sj-white: {WHITE};
+.sj-hero .sj-hero-title {{
+  margin: 0; font-weight: 800; letter-spacing: .2px; color: {WHITE} !important;
 }}
-.sj-header {{
-  background: linear-gradient(90deg, var(--sj-black) 0%, var(--sj-blue) 100%);
-  padding: 14px 18px; border-radius: 14px; color: var(--sj-white);
-  margin: 6px 0 18px 0;
+.sj-hero .sj-hero-sub {{
+  margin: 4px 0 0 0; opacity: .9; color: {WHITE} !important;
 }}
-.sj-header h1 {{ margin: 0; font-weight: 800; letter-spacing: .2px; }}
-.sj-header p  {{ margin: 4px 0 0 0; opacity: .9; }}
 </style>
 """
 
-# Use your container `t` if it exists; otherwise fall back to st.markdown
+# Render (works with an existing container `t`, otherwise falls back to st)
 try:
     t.markdown(hdr_html, unsafe_allow_html=True)  # type: ignore
 except NameError:
