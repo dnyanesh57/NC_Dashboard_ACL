@@ -28,6 +28,38 @@ except Exception:
 # ---------- Page ----------
 st.set_page_config(page_title="Digital NC Register — SJCPL", page_icon="🧭", layout="wide")
 
+# --- Persistent gradient titlebar (forces white text) ---
+APP_TITLE = "🧭 DigiQC — NC Insights Dashboard"
+APP_SUB   = "SJCPL visual theme · Roboto · Brand colors only"
+
+HEADER_BG = f"linear-gradient(90deg, {BLACK} 0%, {BLUE} 100%)"  # uses your brand vars
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
+html, body, [class*="css"], .stApp {{
+  font-family: 'Roboto', sans-serif;
+}}
+/* Ultra-specific + !important so nothing can override it later */
+div#sj-titlebar {{
+  background-image: {HEADER_BG} !important;
+  background-color: {BLACK} !important;     /* fallback while gradient loads */
+  color: {WHITE} !important;
+  padding: 14px 18px; border-radius: 14px; margin: 6px 0 18px 0;
+}}
+div#sj-titlebar h1, div#sj-titlebar p {{
+  color: {WHITE} !important;
+  margin: 0;
+}}
+div#sj-titlebar p {{ margin-top: 4px; opacity: .9; }}
+</style>
+
+<div id="sj-titlebar">
+  <h1>{APP_TITLE}</h1>
+  <p>{APP_SUB}</p>
+</div>
+""", unsafe_allow_html=True)
+
 # ---------- SJCPL Brand (locked) ----------
 WHITE = "#FFFFFF"
 BLACK = "#000000"
