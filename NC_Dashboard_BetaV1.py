@@ -34,6 +34,15 @@ BLACK = "#000000"
 GREY  = "#939598"
 BLUE  = "#00AEDA"
 
+# ---------- SJCPL Brand (locked) ----------
+WHITE = "#FFFFFF"
+BLACK = "#000000"
+GREY  = "#939598"
+BLUE  = "#00AEDA"
+
+# Core 3-color discrete palette used by charts
+BRAND_SEQ = [BLUE, GREY, BLACK]
+
 # ---------- Brand-aware colour helpers (unique brand-only colours) ----------
 from typing import Sequence  # add to your imports
 
