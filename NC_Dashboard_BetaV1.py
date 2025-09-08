@@ -1,19 +1,18 @@
-# digiqc_dashboard_NC_V2.5_BRAND.py
+# digiqc_dashboard_NC_V2.6_BRAND.py
 # Digital NC Register — Streamlit (SJCPL Brand)
-# - Brand-locked palette: Blue(#00AEDA), Black(#000000), Grey(#939598), White(#FFFFFF)
-# - Roboto everywhere (UI + Plotly)
-# - No brand colour reused within a chart; dynamic colours sampled from brand gradient
-# - All charts & states re-mapped to brand colours
-# - Business logic identical to V2.5
+# - Brand-locked colors only (Blue/Black/Grey/White)
+# - Unique color per series within each chart (no reuse)
+# - Gradient sampling when more colors are needed
+# - Uses your NEW robust file upload logic (CSV/Excel + demo fallback)
 # --------------------------------------------------------------
 # Run:
 #   pip install -U streamlit plotly pandas numpy openpyxl
-#   streamlit run digiqc_dashboard_NC_V2.5_BRAND.py
+#   streamlit run digiqc_dashboard_NC_V2.6_BRAND.py
 
 from typing import Optional, Any, Tuple, List, Sequence
 import datetime as dt
+import io
 import re
-import io  # NEW
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -35,17 +34,16 @@ BLACK = "#000000"
 GREY  = "#939598"
 BLUE  = "#00AEDA"
 
-# Status colours mapped to brand-only choices (defaults; will be overridden per-view with unique maps)
 SJCPL_STATUS = {
-    "Closed":     BLACK,      # Terminal / final
-    "Resolved":   BLACK,      # Effective resolution (same visual as Closed)
-    "Approved":   GREY,       # Neutral
-    "In Process": BLUE,       # Active
-    "In-Process": BLUE,       # Active
-    "Open":       BLUE,       # Active
-    "Redo":       GREY,       # Neutral/needs action
-    "Rejected":   GREY,       # Neutral/negative mapped to grey
-    "Responded":  BLUE,       # Progress event
+    "Closed":     BLACK,
+    "Resolved":   BLACK,
+    "Approved":   GREY,
+    "In Process": BLUE,
+    "In-Process": BLUE,
+    "Open":       BLUE,
+    "Redo":       GREY,
+    "Rejected":   GREY,
+    "Responded":  BLUE,
 }
 
 SJCPL_METRICS = {
@@ -56,14 +54,11 @@ SJCPL_METRICS = {
     "RespOnly": GREY,
 }
 
-# Continuous gradient using only brand colours
 BRAND_GRADIENT = [
     [0.0, WHITE],
     [0.5, BLUE],
     [1.0, BLACK],
 ]
-
-# Discrete base palette (used when few series); extended dynamically as needed
 BRAND_SEQ = [BLUE, GREY, BLACK]
 
 THEMES = {
@@ -75,8 +70,6 @@ THEMES = {
         "palette": BRAND_SEQ
     }
 }
-
-# Single, locked theme
 theme = "SJCPL"
 
 # ---------- Brand-aware colour helpers ----------
@@ -96,52 +89,36 @@ def _mix(c1: str, c2: str, t: float) -> str:
 
 def _text_on(bg_hex: str) -> str:
     r,g,b = _hex_to_rgb(bg_hex)
-    # perceptual luminance
     lum = 0.2126*r + 0.7152*g + 0.0722*b
     return WHITE if lum < 140 else BLACK
 
 def sample_brand_gradient(n: int, clamp: tuple[float,float]=(0.06, 0.94)) -> list[str]:
-    """
-    Evenly sample n distinct colours from the brand gradient WHITE→BLUE→BLACK,
-    clamping ends so we never hit pure white/black.
-    """
     if n <= 0: return []
     xs = np.linspace(clamp[0], clamp[1], n)
     out: list[str] = []
     for t in xs:
         if t <= 0.5:
-            local = (t - 0.0) / 0.5
-            out.append(_mix(WHITE, BLUE, local))
+            out.append(_mix(WHITE, BLUE, (t - 0.0)/0.5))
         else:
-            local = (t - 0.5) / 0.5
-            out.append(_mix(BLUE, BLACK, local))
-    # ensure uniqueness (defensive)
+            out.append(_mix(BLUE, BLACK, (t - 0.5)/0.5))
+    # ensure uniqueness
     seen = set(); uniq = []
     for i, c in enumerate(out):
         u = c.upper()
         if u in seen:
-            # tiny nudge along gradient to avoid duplicates
             tj = float(xs[i]) + 0.001
             tj = min(clamp[1], max(clamp[0], tj))
-            if tj <= 0.5:
-                cj = _mix(WHITE, BLUE, (tj - 0.0)/0.5)
-            else:
-                cj = _mix(BLUE, BLACK, (tj - 0.5)/0.5)
-            c = cj
+            c = _mix(WHITE, BLUE, (tj - 0.0)/0.5) if tj <= 0.5 else _mix(BLUE, BLACK, (tj - 0.5)/0.5)
             u = c.upper()
         uniq.append(c); seen.add(u)
     return uniq
 
 def generate_brand_sequence(n: int) -> list[str]:
-    """Start with base 3, expand with gradient to guarantee n unique brand-only colours."""
     base = BRAND_SEQ[:]
-    if n <= len(base):
-        return base[:n]
-    extra = sample_brand_gradient(n - len(base))
-    return base + extra
+    if n <= len(base): return base[:n]
+    return base + sample_brand_gradient(n - len(base))
 
 def brand_map_for(values: Sequence) -> dict[str,str]:
-    """Stable map: each unique value → a distinct brand-derived colour."""
     vals = [str(v) for v in values]
     cols = generate_brand_sequence(len(vals))
     return dict(zip(vals, cols))
@@ -150,14 +127,7 @@ def style_fig(fig, theme_name: str):
     fig.update_layout(
         template=THEMES[theme_name]["template"],
         font=dict(family="Roboto, Arial, sans-serif", size=12, color=BLACK),
-        legend=dict(
-            title='',
-            orientation="h",
-            yanchor="bottom",
-            y=1.05,
-            xanchor="left",
-            x=0
-        ),
+        legend=dict(title='', orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
         hoverlabel=dict(bgcolor="rgba(255,255,255,0.95)", font=dict(family="Roboto, Arial, sans-serif", color=BLACK)),
         bargap=0.22,
         margin=dict(l=10, r=10, t=80, b=30)
@@ -268,7 +238,6 @@ def style_status_rows(df: pd.DataFrame, status_map: dict) -> Styler:
 
 # ---------- Derived columns (effective closure + flags) ----------
 def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Ensure future/rolling-out fields exist
     for col in [
         "Root Cause Analysis","Correction","Corrective Action",
         "Labour Cost","Material Cost","Machinery Cost","Other Cost","Total Cost"
@@ -276,27 +245,22 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = np.nan
 
-    # Location Variable fix
     df["Location Variable (Fixed)"] = extract_location_variable(_safe_get(df, "Location Variable")) if "Location Variable" in df.columns else np.nan
 
-    # Datetimes
     df["_RaisedOnDT"]     = combine_datetime(_safe_get(df, "Raised On Date"), _safe_get(df, "Raised On Time"))
     df["_DeadlineDT"]     = combine_datetime(_safe_get(df, "Deadline Date"), _safe_get(df, "Deadline Time"))
     df["_RespondedOnDT"]  = combine_datetime(_safe_get(df, "Responded On Date"), _safe_get(df, "Responded On Time"))
     df["_RejectedOnDT"]   = combine_datetime(_safe_get(df, "Rejected On Date"), _safe_get(df, "Rejected On Time"))
     df["_ClosedOnDT"]     = combine_datetime(_safe_get(df, "Closed On Date"), _safe_get(df, "Closed On Time"))
 
-    # Effective resolution (vectorized): closed else responded>raised
     eff = df["_ClosedOnDT"].copy()
     mask_eff = eff.isna() & df["_RespondedOnDT"].notna() & df["_RaisedOnDT"].notna() & (df["_RespondedOnDT"] > df["_RaisedOnDT"])
     eff.loc[mask_eff] = df.loc[mask_eff, "_RespondedOnDT"]
     df["_EffectiveResolutionDT"] = eff
 
-    # Timings
     df["Computed Closure Time (Hrs)"] = (df["_EffectiveResolutionDT"] - df["_RaisedOnDT"]).dt.total_seconds() / 3600.0
     df["Responding Time (Hrs)"]       = (df["_RespondedOnDT"] - df["_RaisedOnDT"]).dt.total_seconds() / 3600.0
 
-    # Responded but NOT Closed
     df["_RespondedNotClosed_Flag"] = (
         df["_ClosedOnDT"].isna() &
         df["_RespondedOnDT"].notna() &
@@ -304,7 +268,6 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         (df["_RespondedOnDT"] > df["_RaisedOnDT"])
     ).astype(int)
 
-    # Close-after-response (only when effective >= responded)
     mask_car = df["_EffectiveResolutionDT"].notna() & df["_RespondedOnDT"].notna() & (df["_EffectiveResolutionDT"] >= df["_RespondedOnDT"])
     df["Close After Response (Hrs)"] = np.where(
         mask_car,
@@ -312,20 +275,17 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         np.nan
     )
 
-    # SLA
     df["SLA Met"] = np.where(
         df["_DeadlineDT"].notna() & df["_EffectiveResolutionDT"].notna(),
         df["_EffectiveResolutionDT"] <= df["_DeadlineDT"],
         np.nan
     )
 
-    # Total cost fallback
     parts = ["Labour Cost","Material Cost","Machinery Cost","Other Cost"]
     if "Total Cost" in df.columns:
         part_sum = df[[p for p in parts if p in df.columns]].apply(pd.to_numeric, errors="coerce").sum(axis=1, min_count=1)
         df["Total Cost"] = pd.to_numeric(df["Total Cost"], errors="coerce").fillna(part_sum)
 
-    # -------- Rejected → Closed flags (inferred + strict) --------
     def _nz(series_name: str) -> pd.Series:
         s = _safe_get(df, series_name)
         return s.where(s.notna(), "").astype(str).str.strip()
@@ -385,7 +345,7 @@ def _clean_hours_for_hist(s: pd.Series) -> pd.Series:
 
 def metrics_summary(df: pd.DataFrame, theme_name: str):
     total_issues = len(df)
-    resolved = (df["_EffectiveResolutionDT"].notna()).sum()  # Closed OR Responded>Raised
+    resolved = (df["_EffectiveResolutionDT"].notna()).sum()
     open_issues = total_issues - resolved
     median_response = pd.to_timedelta(df["Responding Time (Hrs)"], unit="h").median(skipna=True)
     median_close    = pd.to_timedelta(df["Computed Closure Time (Hrs)"], unit="h").median(skipna=True)
@@ -407,16 +367,56 @@ def metrics_summary(df: pd.DataFrame, theme_name: str):
     with t5: st.metric("Median Responding Time", _fmt(median_response))
     with t6: st.metric("SLA Met Rate", f"{sla_rate:.1f}%" if pd.notna(sla_rate) else "—")
 
+# ---------- YOUR NEW LOAD LOGIC (as provided) ----------
+def normalize_colname(c: str) -> str:
+    """Keep official column labels intact, but clean whitespace and unicode quirks."""
+    s = str(c).replace("\u2013", "-").replace("\u2014", "-").replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
+    """
+    Robust reader:
+      - If file is None: pull demo CSV from GitHub
+      - Else: try Excel, else CSV with multiple encodings
+      - Normalize column names and drop duplicate columns
+    """
+    if file is None:
+        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
+        try:
+            df = pd.read_csv(default_path)
+        except Exception:
+            st.error("No file uploaded and demo CSV not found in working directory.")
+            st.stop()
+    else:
+        name = getattr(file, "name", "uploaded.csv").lower()
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            df = pd.read_excel(file)
+        else:
+            # Try a few encodings for CSV
+            for enc in [None, "utf-8", "utf-8-sig", "latin-1"]:
+                try:
+                    file.seek(0)
+                    df = pd.read_csv(file, encoding=enc)
+                    break
+                except Exception:
+                    continue
+            else:
+                st.error("Could not read the uploaded CSV with common encodings.")
+                st.stop()
+    # Clean & dedupe headers safely (does NOT change label wording)
+    df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
+    df = df.loc[:, ~pd.Series(df.columns).duplicated().values]
+    return df
+
 # ---------- Sidebar (brand-locked) ----------
 with st.sidebar:
     st.title("🧭 Digital NC Register")
     st.caption("SJCPL brand-locked UI (Roboto + Blue/Black/Grey/White)")
-    # Optional logo
     logo_url = st.text_input("Logo URL (optional)", value="")
     st.markdown("#### Data Source")
-    DEFAULT_PATH = r"C:\Users\Lenovo\Downloads\CSV-INSTRUCTION-DETAIL-REPORT-08-28-2025-08-33-46.csv"
-    uploaded = st.file_uploader("Upload Issue Register CSV", type=["csv"], key="uploader")
-    use_default = st.toggle("Use default (auto-loaded)", value=True, key="use-default")
+    uploaded = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx","xls"], key="uploader")
+    st.caption("If nothing is uploaded, a demo CSV from GitHub will be loaded automatically.")
 
 # Apply brand defaults for Plotly
 px.defaults.template = THEMES[theme]["template"]
@@ -476,48 +476,20 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ----------------------------- Load data ----------------------------
-def normalize_colname(c: str) -> str:
-    """Keep official column labels intact, but clean whitespace and unicode quirks."""
-    s = str(c).replace("\u2013", "-").replace("\u2014", "-").replace("\u00A0", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+# ---------- Load & preprocess ----------
+try:
+    df_raw = load_data(uploaded)
+except Exception as e:
+    st.error(f"Failed to load data: {e}")
+    st.stop()
 
-def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
-    """
-    Robust reader:
-      - If file is None: pull demo CSV from GitHub
-      - Else: try Excel, else CSV with multiple encodings
-      - Normalize column names and drop duplicate columns
-    """
-    if file is None:
-        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
-        try:
-            df = pd.read_csv(default_path)
-        except Exception:
-            st.error("No file uploaded and demo CSV not found in working directory.")
-            st.stop()
-    else:
-        name = getattr(file, "name", "uploaded.csv").lower()
-        if name.endswith(".xlsx") or name.endswith(".xls"):
-            df = pd.read_excel(file)
-        else:
-            # Try a few encodings for CSV
-            for enc in [None, "utf-8", "utf-8-sig", "latin-1"]:
-                try:
-                    file.seek(0)
-                    df = pd.read_csv(file, encoding=enc)
-                    break
-                except Exception:
-                    continue
-            else:
-                st.error("Could not read the uploaded CSV with common encodings.")
-                st.stop()
-    # Clean & dedupe headers safely (does NOT change label wording)
-    df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
-    df = df.loc[:, ~pd.Series(df.columns).duplicated().values]
-    return df
+@st.cache_data(show_spinner=False)
+def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
+    df = df_in.copy()
+    df.columns = [c.strip() for c in df.columns]
+    return add_derived_columns(df)
 
+df = preprocess(df_raw)
 
 # ---------- Global filters ----------
 def get_date_range_inputs(df: pd.DataFrame) -> Tuple[Optional[dt.date], Optional[dt.date]]:
@@ -576,12 +548,12 @@ def filtered_view(df: pd.DataFrame) -> pd.DataFrame:
 df_filtered = filtered_view(df)
 st.divider()
 
-# ---------- Dynamic, per-view colour maps (unique per chart) ----------
+# ---------- Dynamic, per-view colour maps ----------
 def _uniq(col: str) -> List[str]:
     return df_filtered.get(col, pd.Series(dtype=str)).dropna().astype(str).unique().tolist()
 
-metric_colors = THEMES[theme]["metric_map"]  # keep for single-series colours
-status_colors = THEMES[theme]["status_map"]  # default fallback
+metric_colors = THEMES[theme]["metric_map"]
+status_colors = THEMES[theme]["status_map"]
 
 STATUS_COLOR_MAP = brand_map_for(sorted(_uniq("Current Status")))
 METRIC_MAP_2 = brand_map_for(["Total", "Rejected→Closed"])
@@ -632,7 +604,7 @@ with tabs[0]:
             resp_counts.sort_values("Responded not Closed"),
             x="Responded not Closed", y="Assignee", orientation="h",
             title="Responded but NOT Closed — by Assignee",
-            color_discrete_sequence=[metric_colors["RespOnly"]]  # single-series is fine
+            color_discrete_sequence=[metric_colors["RespOnly"]]
         )
         show_chart(style_fig(fig_resp_only, theme), key="ov-responded-not-closed-assignee")
 
@@ -924,7 +896,7 @@ with tabs[6]:
             RespOnly=("_RespondedNotClosed_Flag", "sum"),
         ).reset_index()
         fig2 = go.Figure()
-        line_cols = generate_brand_sequence(4)  # ensure 4 distinct brand colours
+        line_cols = generate_brand_sequence(4)
         fig2.add_trace(go.Scatter(x=series["Date"], y=series["Raised"],   mode="lines", name="Raised",               line=dict(color=line_cols[0])))
         fig2.add_trace(go.Scatter(x=series["Date"], y=series["Resolved"], mode="lines", name="Resolved",             line=dict(color=line_cols[1])))
         fig2.add_trace(go.Scatter(x=series["Date"], y=series["R2C"],      mode="lines", name="Rejected→Closed",      line=dict(color=line_cols[2])))
@@ -934,16 +906,13 @@ with tabs[6]:
     else:
         st.info("No Raised On timestamps available.")
 
-# ---------- NC-View (interactive single NC timeline) ----------
+# ---------- NC-View ----------
 with tabs[7]:
     st.header("NC-View")
 
     proj_opts = sorted(df_filtered.get("Project Name", pd.Series(dtype=str)).dropna().unique().tolist())
     sel_proj = st.selectbox("Filter by Project (optional)", ["(All)"] + proj_opts, index=0, key="nc-proj")
-    if sel_proj != "(All)":
-        df_scope = df_filtered[df_filtered.get("Project Name","").astype(str) == sel_proj]
-    else:
-        df_scope = df_filtered
+    df_scope = df_filtered if sel_proj == "(All)" else df_filtered[df_filtered.get("Project Name","").astype(str) == sel_proj]
 
     if "Reference ID" in df_scope.columns and len(df_scope):
         ref_opts = df_scope["Reference ID"].astype(str).tolist()
@@ -972,7 +941,6 @@ with tabs[7]:
             f"Effective: {_fmt_ts(r.get('_EffectiveResolutionDT'))}"
         )
 
-        # Event strip (unique brand colours)
         events = []
         for name, col in [
             ("Raised", "_RaisedOnDT"),
@@ -1001,7 +969,6 @@ with tabs[7]:
         else:
             st.info("No timestamps available to draw the event strip.")
 
-        # Gantt segments (Raised→Responded, Responded→Effective)
         segs = []
         rs = r.get("_RaisedOnDT"); rp = r.get("_RespondedOnDT"); ef = r.get("_EffectiveResolutionDT")
         if pd.notna(rs) and pd.notna(rp) and rp >= rs:
@@ -1021,7 +988,6 @@ with tabs[7]:
         else:
             st.info("Not enough timestamps to render Gantt segments.")
 
-        # Status step chart (single series; brand line OK)
         steps = []
         if pd.notna(rs): steps.append(("Raised", pd.to_datetime(rs), 0))
         if pd.notna(rp) and pd.notna(rs) and rp >= rs: steps.append(("Responded", pd.to_datetime(rp), 1))
@@ -1029,9 +995,9 @@ with tabs[7]:
         if pd.notna(rj) and (not steps or pd.to_datetime(rj) >= steps[-1][1]): steps.append(("Rejected", pd.to_datetime(rj), 2))
         cl = r.get("_ClosedOnDT")
         if pd.notna(cl): steps.append(("Closed", pd.to_datetime(cl), 3))
-        ef = r.get("_EffectiveResolutionDT")
-        if pd.notna(ef) and (not cl or pd.to_datetime(ef) != pd.to_datetime(cl)):
-            steps.append(("Effective", pd.to_datetime(ef), 4))
+        ef_ts = r.get("_EffectiveResolutionDT")
+        if pd.notna(ef_ts) and (not cl or pd.to_datetime(ef_ts) != pd.to_datetime(cl)):
+            steps.append(("Effective", pd.to_datetime(ef_ts), 4))
         if steps:
             xs = [t[1] for t in steps]
             ys = [t[2] for t in steps]
@@ -1046,7 +1012,6 @@ with tabs[7]:
         else:
             st.info("Not enough events to render a step chart.")
 
-        # SLA bullet: deadline vs actual (hours since Raised) — brand-only colours
         rs = r.get("_RaisedOnDT"); dl = r.get("_DeadlineDT"); eff = r.get("_EffectiveResolutionDT")
         if pd.notna(rs) and (pd.notna(dl) or pd.notna(eff)):
             base = pd.to_datetime(rs)
@@ -1066,7 +1031,6 @@ with tabs[7]:
                 show_chart(style_fig(fig_b, theme), key="nc-sla-bullet")
         else:
             st.info("No SLA/Effective times available for bullet chart.")
-
     else:
         st.info("Select a Reference ID to view details.")
 
@@ -1111,7 +1075,7 @@ with tabs[8]:
                 agg = agg.sort_values("Count", ascending=False).head(max_nodes)
             agg = unique_columns(agg)
             path_cols = [c for c in agg.columns if c.startswith("Level_")]
-            palette_big = sample_brand_gradient(64)  # generous set of unique brand colours
+            palette_big = sample_brand_gradient(64)
             fig_t = px.treemap(
                 agg, path=path_cols, values="Count",
                 color_discrete_sequence=palette_big
