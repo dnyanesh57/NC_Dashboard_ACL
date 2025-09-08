@@ -71,6 +71,41 @@ THEMES = {
     }
 }
 theme = "SJCPL"
+# --- Brand H1 Header (drop this near the top, after color constants) ---
+APP_TITLE = "🧭 DigiQC — NC Insights Dashboard"
+APP_SUB   = "SJCPL visual theme · Roboto · Brand colors only"
+
+hdr_html = f"""
+<div class="sj-header">
+  <h1>{APP_TITLE}</h1>
+  <p>{APP_SUB}</p>
+</div>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
+html, body, [class*="css"], .stApp {{
+  font-family: 'Roboto', sans-serif;
+}}
+:root {{
+  --sj-blue: {BLUE};
+  --sj-grey: {GREY};
+  --sj-black: {BLACK};
+  --sj-white: {WHITE};
+}}
+.sj-header {{
+  background: linear-gradient(90deg, var(--sj-black) 0%, var(--sj-blue) 100%);
+  padding: 14px 18px; border-radius: 14px; color: var(--sj-white);
+  margin: 6px 0 18px 0;
+}}
+.sj-header h1 {{ margin: 0; font-weight: 800; letter-spacing: .2px; }}
+.sj-header p  {{ margin: 4px 0 0 0; opacity: .9; }}
+</style>
+"""
+
+# Use your container `t` if it exists; otherwise fall back to st.markdown
+try:
+    t.markdown(hdr_html, unsafe_allow_html=True)  # type: ignore
+except NameError:
+    st.markdown(hdr_html, unsafe_allow_html=True)
 
 
 # ---------- Brand-aware colour helpers ----------
