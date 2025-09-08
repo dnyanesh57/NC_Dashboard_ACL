@@ -13,6 +13,7 @@
 from typing import Optional, Any, Tuple, List, Sequence
 import datetime as dt
 import re
+import io  # NEW
 import numpy as np
 import pandas as pd
 import plotly.express as px
