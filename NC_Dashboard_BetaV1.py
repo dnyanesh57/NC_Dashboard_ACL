@@ -72,6 +72,21 @@ THEMES = {
 }
 theme = "SJCPL"
 
+# Plotly defaults (brand-only)
+px.defaults.template = "plotly_white"
+px.defaults.color_discrete_sequence = [
+    SJCPL["BLUE"], SJCPL["BLUE_700"], SJCPL["BLUE_200"],
+    SJCPL["GREY"], SJCPL["GREY_600"], SJCPL["GREY_200"], SJCPL["BLACK"]
+]
+
+# Brand continuous scale (Grey -> Blue)
+SJCPL_CONT = [
+    [0.00, SJCPL["WHITE"]],
+    [0.20, SJCPL["GREY_200"]],
+    [0.45, SJCPL["GREY"]],
+    [0.70, SJCPL["BLUE_200"]],
+    [1.00, SJCPL["BLUE"]],
+]
 # Inject Roboto + brand header
 st.markdown("""
 <style>
