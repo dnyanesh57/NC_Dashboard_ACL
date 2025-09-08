@@ -700,16 +700,24 @@ with tabs[0]:
             st.info("No data for Computed Closure Time.")
 
 # ---------- Status (NEW) ----------
+# ---------- Status (changes) ----------
 with tabs[1]:
     st.header("Status")
-    st.caption("See which NCs changed status Today, in the Last 3 days, or in This week.")
+    st.caption("See which NCs changed status Today, in the Last 3 days, or in This week. Click bars to highlight rows below.")
 
-    # Ensure required columns exist (robust even if preprocess didn’t run)
-    df_filtered = ensure_last_status_change(df_filtered)
-    last_change = pd.to_datetime(df_filtered["_LastStatusChangeDT"], errors="coerce")
+    # Optional click-capture (pip install streamlit-plotly-events)
+    try:
+        from streamlit_plotly_events import plotly_events  # type: ignore
+        _HAS_EVT = True
+    except Exception:
+        _HAS_EVT = False
 
+    # Ensure we have _LastStatusChangeDT / _LastStatusEvent
+    df_status = ensure_last_status_change(df_filtered.copy())
+    last_change = pd.to_datetime(df_status["_LastStatusChangeDT"], errors="coerce")
+
+    # Window selector
     period = st.selectbox("Show changes from", ["Today", "Last 3 days", "This week", "All"], index=0, key="status-period")
-
     now = pd.Timestamp.now()
     today = now.normalize()
     start_of_week = today - pd.Timedelta(days=today.weekday())  # Monday
@@ -718,7 +726,7 @@ with tabs[1]:
         m = last_change.dt.normalize() == today
         window_label = f"Today ({today.date()})"
     elif period == "Last 3 days":
-        cutoff = today - pd.Timedelta(days=2)  # today + previous 2 = 3 days incl. today
+        cutoff = today - pd.Timedelta(days=2)  # inclusive: today + previous 2 days
         m = last_change >= cutoff
         window_label = f"Last 3 days (since {cutoff.date()})"
     elif period == "This week":
@@ -728,83 +736,137 @@ with tabs[1]:
         m = last_change.notna()
         window_label = "All available"
 
-    changed = df_filtered.loc[m & last_change.notna()].copy()
+    changed = df_status.loc[m & last_change.notna()].copy()
+    st.markdown(f"**Window:** {window_label} — **Changed rows:** {len(changed)}")
 
-    count_changed = len(changed)
-    total_in_scope = len(df_filtered)
+    # Quick R2C metrics in this window
+    cA, cB, cC = st.columns(3)
+    with cA:
+        st.metric("R→C (inferred) in window", int((changed["_R2C_Flag"] == 1).sum()))
+    with cB:
+        st.metric("R→C (strict) in window", int((changed["_R2C_Strict_Flag"] == 1).sum()))
+    with cC:
+        st.metric("Resolved (Effective) in window", int(changed["_EffectiveResolutionDT"].notna().sum()))
 
-    c1,c2,c3 = st.columns(3)
-    with c1: st.metric("NCs with Status Change", f"{count_changed}")
-    with c2: st.metric("Window", window_label)
-    with c3:
-        pct = (count_changed/total_in_scope*100.0) if total_in_scope else 0.0
-        st.metric("% of Filtered NCs", f"{pct:.1f}%")
+    # Helper for conditional row highlighting
+    def _style_click_highlight(df_in: pd.DataFrame, sel_col: str, sel_value: str | None):
+        if not sel_value or sel_col not in df_in.columns:
+            return df_in.head(1500)
+        def hi(row):
+            match = str(row.get(sel_col, "")) == str(sel_value)
+            return [("background-color:#FFF3CD; color:#111;" if match else "")] * len(row)
+        try:
+            return df_in.head(1500).style.apply(hi, axis=1)
+        except Exception:
+            return df_in.head(1500)
 
-    if count_changed == 0:
-        st.info("No status changes found for the selected period and filters.")
+    if len(changed) == 0:
+        st.info("No status changes in the selected window.")
     else:
-        # Bar: by Last Status Event
-        evt_counts = (changed["_LastStatusEvent"].fillna("Unknown")
-                      .value_counts().rename_axis("Event").reset_index(name="Count"))
-        # Distinct colour for each event (within brand gamut)
-        evt_colors = {
-            "Responded": BLUE,
-            "Rejected": GREY,
-            "Closed": BLACK,
-            "Effective": blend(BLUE, BLACK, 0.55),  # brand-based gradient tone
-            "Unknown": blend(GREY, WHITE, 0.35)
-        }
-        fig_evt = px.bar(evt_counts, x="Event", y="Count", text_auto=True,
-                         color="Event",
-                         color_discrete_map=evt_colors)
-        fig_evt.update_layout(title="Status Changes — by Event")
-        show_chart(style_fig(fig_evt, theme), key="st-evt-bar")
+        # 1) Last Status Event — counts (non-click)
+        ev_counts = changed["_LastStatusEvent"].fillna("—").astype(str).value_counts().rename_axis("Event").reset_index(name="Count")
+        cmap_ev = brand_map_for(ev_counts["Event"].tolist())
+        fig_ev = px.bar(ev_counts, x="Event", y="Count", text_auto=True, title="Last Status Event — Counts",
+                        color="Event", color_discrete_map=cmap_ev)
+        show_chart(style_fig(fig_ev, theme), key="status-ev-counts")
 
-        cA, cB = st.columns(2)
-        with cA:
-            # Top Projects
-            if "Project Name" in changed.columns:
-                top_proj = (changed["Project Name"].fillna("—").value_counts()
-                            .rename_axis("Project").reset_index(name="Count")).head(15)
-                fig_proj = px.bar(top_proj.sort_values("Count"),
-                                  x="Count", y="Project", orientation="h",
-                                  title="Status Changes — by Project (Top 15)",
-                                  color_discrete_sequence=distinct_brand_colors(1))
-                show_chart(style_fig(fig_proj, theme), key="st-proj-bar")
-        with cB:
-            # Top Assignees
-            if "Assigned Team User" in changed.columns:
-                top_user = (changed["Assigned Team User"].fillna("—").astype(str)
-                            .value_counts().rename_axis("Assignee").reset_index(name="Count")).head(15)
-                fig_user = px.bar(top_user.sort_values("Count"),
-                                  x="Count", y="Assignee", orientation="h",
-                                  title="Status Changes — by Assignee (Top 15)",
-                                  color_discrete_sequence=distinct_brand_colors(1))
-                show_chart(style_fig(fig_user, theme), key="st-user-bar")
+        # 2) Current Status (after change) — CLICKABLE
+        selected_status = st.session_state.get("status_click_pick", None)
+        if "Current Status" in changed.columns:
+            cs_counts = (changed["Current Status"].fillna("—").astype(str)
+                         .value_counts().rename_axis("Current Status").reset_index(name="Count"))
+            cmap_cs = brand_map_for(cs_counts["Current Status"].tolist())
+            fig_cs = px.bar(
+                cs_counts, x="Current Status", y="Count", text_auto=True,
+                title="Current Status (after change) — Click a bar to highlight rows below",
+                color="Current Status", color_discrete_map=cmap_cs
+            )
+            fig_cs.update_xaxes(tickangle=20)
+            if _HAS_EVT:
+                # Capture click and store the picked status
+                click = plotly_events(fig_cs, click_event=True, hover_event=False, select_event=False,
+                                      keep_hover=False, override_width="100%", key="status-cur-counts-evt")
+                if click:
+                    picked = click[0].get("x") or click[0].get("label") or click[0].get("y")
+                    if picked:
+                        st.session_state["status_click_pick"] = str(picked)
+                        selected_status = str(picked)
+            else:
+                # Fallback rendering + manual selector
+                show_chart(style_fig(fig_cs, theme), key="status-cur-counts")
+                with st.expander("Filter/highlight by status (click support available if you install streamlit-plotly-events)"):
+                    selected_status = st.selectbox(
+                        "Pick a status to highlight/filter", ["(none)"] + cs_counts["Current Status"].tolist(),
+                        index=(0 if not selected_status else (cs_counts["Current Status"].tolist().index(selected_status) + 1)
+                               if selected_status in cs_counts["Current Status"].tolist() else 0),
+                        key="status-cur-manual"
+                    )
+                    if selected_status == "(none)":
+                        selected_status = None
 
-        # Mini timeline: changes per day in window
-        changed["Change Date"] = changed["_LastStatusChangeDT"].dt.date
-        daily = changed.groupby("Change Date").size().reset_index(name="Count")
-        fig_line = go.Figure()
-        fig_line.add_trace(go.Scatter(x=daily["Change Date"], y=daily["Count"], mode="lines+markers",
-                                      line=dict(color=BLUE)))
-        fig_line.update_layout(title="Daily Status Changes", xaxis_title="", yaxis_title="Count")
-        show_chart(style_fig(fig_line, theme), key="st-daily-line")
+        # 3) R→C breakdown (inferred) in this window
+        r2c_win = changed[changed["_R2C_Flag"] == 1]
+        if len(r2c_win):
+            c1, c2 = st.columns(2)
+            with c1:
+                # Top assignees
+                if "Assigned Team User" in r2c_win.columns:
+                    counts = (r2c_win["Assigned Team User"].fillna("—").astype(str)
+                              .value_counts().rename_axis("Assignee").reset_index(name="Rejected→Closed"))
+                    cmap = brand_map_for(counts["Assignee"].tolist())
+                    fig_r2c_scope = px.bar(counts.sort_values("Rejected→Closed"),
+                                           x="Rejected→Closed", y="Assignee", orientation="h",
+                                           title="Rejected → Closed (inferred) — by Assignee (in window)",
+                                           color="Assignee", color_discrete_map=cmap, text_auto=True)
+                    show_chart(style_fig(fig_r2c_scope, theme), key="status-r2c-assg")
+            with c2:
+                # Distribution by Current Status after change
+                cs_r2c = (r2c_win["Current Status"].fillna("—").astype(str)
+                          .value_counts().rename_axis("Current Status").reset_index(name="R→C Count"))
+                cmap2 = brand_map_for(cs_r2c["Current Status"].tolist())
+                fig_r2c_cs = px.bar(cs_r2c, x="Current Status", y="R→C Count", text_auto=True,
+                                    title="Rejected → Closed (inferred) — by Current Status",
+                                    color="Current Status", color_discrete_map=cmap2)
+                fig_r2c_cs.update_xaxes(tickangle=20)
+                show_chart(style_fig(fig_r2c_cs, theme), key="status-r2c-by-status")
 
-        # Table of changed NCs
-        st.subheader("Changed NCs")
+        st.subheader("Changed rows")
+        left, right = st.columns([1,1])
+        with left:
+            mode = st.radio("Show", ["Highlight selection", "Only selected status", "All rows"], horizontal=True, key="status-table-mode")
+        with right:
+            if selected_status:
+                st.success(f"Selected status: **{selected_status}**")
+                if st.button("Clear selection", key="clear-status-pick"):
+                    st.session_state.pop("status_click_pick", None)
+                    selected_status = None
+            elif _HAS_EVT is False:
+                st.caption("Tip: Install `streamlit-plotly-events` to click bars and auto-highlight the table.")
+
+        tbl = changed.copy()
+        # Prepare table columns
         show_cols = [c for c in [
-            "Reference ID","Project Name","Current Status",
-            "_LastStatusEvent","_LastStatusChangeDT",
-            "Assigned Team","Assigned Team User",
-            "Raised On Date","Raised On Time"
-        ] if c in changed.columns]
-        if show_cols:
-            view = changed[show_cols].rename(columns={
-                "_LastStatusEvent":"Last Event",
-                "_LastStatusChangeDT":"Last Changed At"
-            }).sort_values("Last Changed At", ascending=False)
-            st.dataframe(view.head(1500), use_container_width=True)
+            "Reference ID","Project Name","Current Status","Assigned Team","Assigned Team User",
+            "_LastStatusEvent","_LastStatusChangeDT","_RaisedOnDT","_RespondedOnDT","_RejectedOnDT","_ClosedOnDT",
+            "_R2C_Flag","_R2C_Strict_Flag"
+        ] if c in tbl.columns]
+        tbl = tbl[show_cols].sort_values("_LastStatusChangeDT", ascending=False)
+
+        if selected_status and "Current Status" in tbl.columns:
+            mask_sel = tbl["Current Status"].astype(str) == str(selected_status)
+            if mode == "Only selected status":
+                st.dataframe(tbl.loc[mask_sel].head(1500), use_container_width=True)
+            elif mode == "Highlight selection":
+                styled = _style_click_highlight(tbl, "Current Status", selected_status)
+                try:
+                    st.write(styled.to_html(), unsafe_allow_html=True)
+                except Exception:
+                    st.dataframe(tbl.head(1500), use_container_width=True)
+            else:
+                st.dataframe(tbl.head(1500), use_container_width=True)
+        else:
+            st.dataframe(tbl.head(1500), use_container_width=True)
+
 
 # ---------- Project Status ----------
 with tabs[2]:
