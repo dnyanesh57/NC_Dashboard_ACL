@@ -530,7 +530,7 @@ def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
       - Normalize column names and drop duplicate columns
     """
     if file is None:
-        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
+        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-10-2025-09-12-02.csv"
         try:
             df = pd.read_csv(default_path)
         except Exception:
