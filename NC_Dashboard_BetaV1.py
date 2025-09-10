@@ -3,6 +3,7 @@
 # - Keeps V2.6 working framework intact
 # - Fixes fullscreen legend/title overlap (legend docked below + safe margins)
 # - Adds donuts, sunburst, heatmaps, Pareto, backlog area, calendar heatmap, stacked mixes, bubble chart
+# - NEW: Activity-Wise also shows "Normal (Non-R2C)" and "All NCs" sections for recurring-issue tracking
 # - Brand-locked palette: Blue(#00AEDA), Black(#000000), Grey(#939598), White(#FFFFFF)
 # --------------------------------------------------------------
 # Run:
@@ -480,7 +481,7 @@ def metrics_summary(df: pd.DataFrame, theme_name: str):
     with t6: st.metric("SLA Met Rate", f"{sla_rate:.1f}%" if pd.notna(sla_rate) else "—")
 
 # ---------- Header (robust gradient + white text) ----------
-APP_TITLE = "🧭 Digital — NC Insights Dashboard"
+APP_TITLE = "🧭 DigiQC — NC Insights Dashboard"
 APP_SUB   = "SJCPL visual theme · Roboto · Brand colors only"
 HEADER_BG = f"linear-gradient(90deg, {BLACK} 0%, {BLUE} 100%)"
 st.markdown(f"""
@@ -1226,11 +1227,12 @@ with tabs[6]:
     st.header("Activity-Wise")
     st.caption("Totals + R→C (inferred) + Responded-not-Closed; brand gradient for %R→C (White→Blue→Black).")
 
-    def grouped_measures(by_col: str, key_prefix: str, show_ratio: bool = True, topn: int = 20):
-        if by_col not in df_filtered.columns:
+    # --- helper duplicated to allow reuse with custom subsets ---
+    def grouped_measures_for(df_data: pd.DataFrame, by_col: str, key_prefix: str, show_ratio: bool = True, topn: int = 20):
+        if by_col not in df_data.columns:
             return
-        agg = df_filtered.groupby(by_col).agg(
-            Total=("Reference ID","count") if "Reference ID" in df_filtered.columns else (by_col,"count"),
+        agg = df_data.groupby(by_col).agg(
+            Total=("Reference ID","count") if "Reference ID" in df_data.columns else (by_col,"count"),
             Resolved=("_EffectiveResolutionDT", lambda x: x.notna().sum()),
             R2C=("_R2C_Flag", "sum"),
             RespOnly=("_RespondedNotClosed_Flag", "sum"),
@@ -1260,17 +1262,18 @@ with tabs[6]:
             figr.update_traces(texttemplate="%{x:.1f}%")
             show_chart(style_fig(figr, theme), key=f"{key_prefix}-{by_col}-rate")
 
+    # --- Original KPIs on full filtered scope (unchanged) ---
     c1, c2 = st.columns(2)
     with c1:
-        grouped_measures("Type L1", "tab5", show_ratio=True, topn=20)
+        grouped_measures_for(df_filtered, "Type L1", "tab5", show_ratio=True, topn=20)
         if "Tag 1" in df_filtered.columns:
-            grouped_measures("Tag 1", "tab5-tag1", show_ratio=True, topn=20)
+            grouped_measures_for(df_filtered, "Tag 1", "tab5-tag1", show_ratio=True, topn=20)
     with c2:
-        grouped_measures("Type L2", "tab5", show_ratio=True, topn=20)
+        grouped_measures_for(df_filtered, "Type L2", "tab5", show_ratio=True, topn=20)
         if "Tag 2" in df_filtered.columns:
-            grouped_measures("Tag 2", "tab5-tag2", show_ratio=True, topn=20)
+            grouped_measures_for(df_filtered, "Tag 2", "tab5-tag2", show_ratio=True, topn=20)
 
-    # ---- Added: Pareto + extra heatmap + sunburst ----
+    # ---- Original: Pareto & Heatmaps (unchanged) ----
     st.subheader("Pareto & Heatmaps")
 
     if "Type L0" in df_filtered.columns:
@@ -1303,6 +1306,83 @@ with tabs[6]:
                           color="Type L0", color_discrete_sequence=distinct_brand_colors(sb["Type L0"].nunique()+2))
         fig.update_layout(title="Sunburst — Activity Hierarchy")
         show_chart(style_fig(fig, theme), key="aw-sunburst")
+
+    # ===================== NEW SECTION: Normal (Non-R2C) =====================
+    st.subheader("Normal (Non-R2C) — Recurrence & Mix")
+    normal_df = df_filtered[df_filtered["_R2C_Flag"] != 1].copy()
+    if len(normal_df) == 0:
+        st.info("No Non-R2C rows in current filters.")
+    else:
+        cA, cB = st.columns(2)
+        with cA:
+            grouped_measures_for(normal_df, "Type L1", "norm", show_ratio=False, topn=20)
+        with cB:
+            grouped_measures_for(normal_df, "Type L2", "norm", show_ratio=False, topn=20)
+
+        # Donut of status within Normal
+        if "Current Status" in normal_df.columns:
+            vc = normal_df["Current Status"].fillna("—").astype(str).value_counts().reset_index()
+            vc.columns = ["Current Status","Count"]
+            fig = px.pie(vc, names="Current Status", values="Count", hole=0.6,
+                         color="Current Status", color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig.update_layout(title="Normal — Status Split")
+            show_chart(style_fig(fig, theme), key="norm-status-donut")
+
+        # Heatmap L1×Status for Normal
+        if "Type L1" in normal_df.columns and "Current Status" in normal_df.columns:
+            a = normal_df[["Type L1","Current Status"]].copy().fillna("—").astype(str)
+            pv = pd.pivot_table(a, index="Type L1", columns="Current Status", aggfunc=len, fill_value=0)
+            if pv.size:
+                fig = px.imshow(pv.values, x=pv.columns.astype(str), y=pv.index.astype(str),
+                                labels=dict(x="Current Status", y="Type L1", color="Count"), aspect="auto")
+                fig.update_layout(title="Normal — Heatmap (Type L1 × Status)")
+                show_chart(style_fig(fig, theme), key="norm-heatmap-l1")
+
+        # Sunburst for Normal subset
+        if all(c in normal_df.columns for c in ["Type L0","Type L1","Type L2"]):
+            nsb = normal_df.copy()
+            for c in ["Type L0","Type L1","Type L2"]:
+                nsb[c] = nsb[c].fillna("—").astype(str)
+            fig = px.sunburst(nsb, path=["Type L0","Type L1","Type L2"],
+                              color="Type L0", color_discrete_sequence=distinct_brand_colors(nsb["Type L0"].nunique()+2))
+            fig.update_layout(title="Normal — Activity Hierarchy")
+            show_chart(style_fig(fig, theme), key="norm-sunburst")
+
+    # ===================== NEW SECTION: All NCs — Recurring Issue Finder =====================
+    st.subheader("All NCs — Recurring Issue Finder")
+    # Choose field to define "recurrence"
+    choices = []
+    for col in ["Type L2","Type L1","Description","Recommendation","Tag 1","Tag 2","Location Variable (Fixed)"]:
+        if col in df_filtered.columns:
+            choices.append(col)
+    if not choices:
+        st.info("No suitable columns found for recurrence analysis.")
+    else:
+        pick = st.selectbox("Most recurring by", choices, index=0, key="all-recur-by")
+        topn = st.slider("Top N", 5, 50, 20, step=5, key="all-recur-topn")
+
+        # Clean labels a bit for free-text columns
+        series = df_filtered[pick].astype(str).str.strip()
+        series = series.replace(["", "nan", "NaN", "None"], "—")
+        vc = series.value_counts().head(topn).rename_axis(pick).reset_index(name="Count")
+        fig = px.bar(vc.sort_values("Count"),
+                     x="Count", y=pick, orientation="h",
+                     title=f"Most Recurring — {pick} (Top {topn})",
+                     color_discrete_sequence=distinct_brand_colors(1),
+                     text_auto=True)
+        show_chart(style_fig(fig, theme), key="all-recur-top")
+
+        # Optional: show distribution across status for the selected top items
+        if "Current Status" in df_filtered.columns and len(vc):
+            tops = vc[pick].astype(str).tolist()
+            small = df_filtered[df_filtered[pick].astype(str).isin(tops)].copy()
+            small["Current Status"] = small["Current Status"].fillna("—").astype(str)
+            dist = small.groupby([pick, "Current Status"]).size().reset_index(name="Count")
+            fig2 = px.bar(dist, x="Count", y=pick, color="Current Status", orientation="h",
+                          title=f"Status Mix for Top {pick}",
+                          color_discrete_sequence=distinct_brand_colors(dist["Current Status"].nunique()+2),
+                          text_auto=True)
+            show_chart(style_fig(fig2, theme), key="all-recur-statusmix")
 
 # ---------- Timelines (extended) ----------
 with tabs[7]:
@@ -1348,43 +1428,129 @@ with tabs[7]:
         st.info("No Raised On timestamps available.")
 
 # ---------- NC-View ----------
+# ---------- NC-View ----------
 with tabs[8]:
     st.header("NC-View")
 
-    proj_opts = sorted(df_filtered.get("Project Name", pd.Series(dtype=str)).dropna().unique().tolist())
+    # ---- Scope by project (optional) ----
+    proj_opts = sorted(df_filtered.get("Project Name", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
     sel_proj = st.selectbox("Filter by Project (optional)", ["(All)"] + proj_opts, index=0, key="nc-proj")
-    if sel_proj != "(All)":
-        df_scope = df_filtered[df_filtered.get("Project Name","").astype(str) == sel_proj]
-    else:
-        df_scope = df_filtered
+    df_scope = df_filtered if sel_proj == "(All)" else df_filtered[df_filtered.get("Project Name", "").astype(str) == sel_proj]
+
+    # ---- Build a rich, typeable selector ----
+    def _short(s, n=80):
+        if pd.isna(s): return "—"
+        s = str(s).strip()
+        return s if len(s) <= n else s[: n - 1] + "…"
+
+    def _mk_label(r: pd.Series) -> str:
+        ref  = str(r.get("Reference ID", "—"))
+        proj = str(r.get("Project Name", "—"))
+        t1   = str(r.get("Type L1", "—"))
+        t2   = str(r.get("Type L2", "—"))
+        locv = str(r.get("Location Variable (Fixed)", r.get("Location Variable", "—")))
+        desc = _short(r.get("Description", "—"), 70)
+        bits = [ref, proj, f"{t1}/{t2}", locv, desc]
+        # Join with " — " but suppress trailing empties nicely
+        return " — ".join([b for b in bits if b and b != "—"])
 
     if "Reference ID" in df_scope.columns and len(df_scope):
-        ref_opts = df_scope["Reference ID"].astype(str).tolist()
-        sel_ref = st.selectbox("Select Reference ID", ref_opts, key="nc-ref")
-        row = df_scope[df_scope["Reference ID"].astype(str) == sel_ref].head(1)
+        # Build an indexable table of options with a searchable label column
+        opt_df = df_scope.copy()
+        opt_df["_label"] = opt_df.apply(_mk_label, axis=1)
+
+        # Free-text search to narrow down (typable input)
+        q = st.text_input("Search NC (by ref / project / type / location / description)", value="", key="nc-search").strip().lower()
+        if q:
+            mask = opt_df["_label"].str.lower().str.contains(q, na=False)
+            opt_df = opt_df[mask]
+
+        if len(opt_df) == 0:
+            st.info("No NCs match your search and filters.")
+        else:
+            # Selectbox remains typeable and shows the rich label; value is index of the row
+            # Use index to keep it stable even if duplicate refs exist
+            opt_df = opt_df.reset_index(drop=False).rename(columns={"index": "_idx"})
+            sel_idx = st.selectbox(
+                "Select an NC",
+                options=opt_df["_idx"].tolist(),
+                format_func=lambda i: opt_df.loc[opt_df["_idx"] == i, "_label"].values[0],
+                key="nc-ref"
+            )
+            row = df_scope.iloc[sel_idx:sel_idx+1]  # single-row DataFrame slice
     else:
         st.info("No Reference IDs available in current filters.")
         row = pd.DataFrame()
 
+    # ---- Details + visuals for the selected NC ----
     if not row.empty:
         r = row.iloc[0]
-        def _fmt_ts(x):
+
+        # Quick KPIs row
+        def _fmt_dt(x):
             return "" if pd.isna(x) else pd.to_datetime(x).strftime("%Y-%m-%d %H:%M")
 
-        cols = st.columns(4)
-        cols[0].metric("Project", str(r.get("Project Name","—")))
-        cols[1].metric("Status", str(r.get("Current Status","—")))
-        sla = r.get("SLA Met")
-        cols[2].metric("SLA", "Met" if sla is True else ("Missed" if sla is False else "—"))
-        cols[3].metric("Assignee", str(r.get("Assigned Team User","—")))
+        top = st.columns(5)
+        with top[0]: st.metric("Reference", str(r.get("Reference ID", "—")))
+        with top[1]: st.metric("Project",   str(r.get("Project Name", "—")))
+        with top[2]: st.metric("Status",    str(r.get("Current Status", "—")))
+        with top[3]:
+            sla = r.get("SLA Met")
+            st.metric("SLA", "Met" if sla is True else ("Missed" if sla is False else "—"))
+        with top[4]: st.metric("Assignee",  str(r.get("Assigned Team User", "—")))
+
+        # People & timestamps
         st.caption(
-            f"Raised: {_fmt_ts(r.get('_RaisedOnDT'))} | "
-            f"Responded: {_fmt_ts(r.get('_RespondedOnDT'))} | "
-            f"Rejected: {_fmt_ts(r.get('_RejectedOnDT'))} | "
-            f"Closed: {_fmt_ts(r.get('_ClosedOnDT'))} | "
-            f"Effective: {_fmt_ts(r.get('_EffectiveResolutionDT'))}"
+            f"Raised: {_fmt_dt(r.get('_RaisedOnDT'))} | "
+            f"Responded: {_fmt_dt(r.get('_RespondedOnDT'))} | "
+            f"Rejected: {_fmt_dt(r.get('_RejectedOnDT'))} | "
+            f"Closed: {_fmt_dt(r.get('_ClosedOnDT'))} | "
+            f"Effective: {_fmt_dt(r.get('_EffectiveResolutionDT'))}"
         )
 
+        # Key commentary & roles (cards)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("##### 📝 Description")
+            st.write(r.get("Description", "—"))
+            st.markdown("##### ✅ Recommendation")
+            st.write(r.get("Recommendation", "—"))
+
+            st.markdown("##### 💬 Responded Comment")
+            st.write(r.get("Responded Comment", "—"))
+            st.markdown("##### 🚫 Rejected Comment")
+            st.write(r.get("Rejected Comment", "—"))
+            st.markdown("##### 🏁 Closed Comment")
+            st.write(r.get("Closed Comment", "—"))
+        with c2:
+            st.markdown("##### 👥 People")
+            st.write(f"**Raised By:** {r.get('Raised By', '—')}")
+            st.write(f"**Responded By:** {r.get('Responded By', '—')}")
+            st.write(f"**Rejected By:** {r.get('Rejected By', '—')}")
+            st.write(f"**Closed By:** {r.get('Closed By', '—')}")
+
+            st.markdown("##### 🗺️ Location")
+            loc_lines = []
+            for c in ["Location / Reference", "Location Variable (Fixed)", "Location L0", "Location L1", "Location L2", "Location L3"]:
+                if c in row.index:
+                    loc_lines.append(f"**{c}:** {r.get(c, '—')}")
+            st.write("\n\n".join(loc_lines) if loc_lines else "—")
+
+            st.markdown("##### 🏷️ Types & Tags")
+            type_lines = []
+            for c in ["Type L0", "Type L1", "Type L2", "Tag 1", "Tag 2"]:
+                if c in row.index:
+                    type_lines.append(f"**{c}:** {r.get(c, '—')}")
+            st.write("\n\n".join(type_lines) if type_lines else "—")
+
+            # URL if present
+            url_val = r.get("URL", None)
+            if isinstance(url_val, str) and url_val.strip():
+                st.markdown(f"##### 🔗 Link\n[{_short(url_val, 60)}]({url_val})")
+
+        st.divider()
+
+        # Keep your original visuals (event strip, Gantt, step, SLA bullet)
         # Event strip
         events = []
         for name, col, color in [
@@ -1457,7 +1623,7 @@ with tabs[8]:
             st.info("Not enough events to render a step chart.")
 
         # SLA bullet
-        rs = r.get("_RaisedOnDT"); dl = r.get("_DeadlineDT"); ef = r.get("_EffectiveResolutionDT")
+        dl = r.get("_DeadlineDT"); ef = r.get("_EffectiveResolutionDT")
         if pd.notna(rs) and (pd.notna(dl) or pd.notna(ef)):
             base = pd.to_datetime(rs)
             dl_hours = (pd.to_datetime(dl) - base).total_seconds()/3600 if pd.notna(dl) else None
@@ -1476,8 +1642,29 @@ with tabs[8]:
         else:
             st.info("No SLA/Effective times available for bullet chart.")
 
+        st.divider()
+        # ---- All raw fields (one-stop detail view) ----
+        with st.expander("All fields (raw)"):
+            # transpose pretty: two columns if many fields
+            raw_series = r.copy()
+            # Convert datetimes to readable strings
+            for c in raw_series.index:
+                v = raw_series[c]
+                if pd.api.types.is_datetime64_any_dtype(type(v)) or isinstance(v, pd.Timestamp):
+                    raw_series[c] = _fmt_dt(v)
+            # Show as a two-column markdown table for readability
+            keys = list(raw_series.index)
+            half = (len(keys) + 1) // 2
+            left_keys, right_keys = keys[:half], keys[half:]
+            lc, rc = st.columns(2)
+            with lc:
+                for k in left_keys:
+                    st.markdown(f"**{k}:**  {raw_series.get(k, '—')}")
+            with rc:
+                for k in right_keys:
+                    st.markdown(f"**{k}:**  {raw_series.get(k, '—')}")
     else:
-        st.info("Select a Reference ID to view details.")
+        st.info("Select an NC to view details.")
 
 # ---------- Sketch-View (Treemap) ----------
 with tabs[9]:
