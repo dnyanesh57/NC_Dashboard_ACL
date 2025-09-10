@@ -481,7 +481,7 @@ def metrics_summary(df: pd.DataFrame, theme_name: str):
     with t6: st.metric("SLA Met Rate", f"{sla_rate:.1f}%" if pd.notna(sla_rate) else "—")
 
 # ---------- Header (robust gradient + white text) ----------
-APP_TITLE = "🧭 DigiQC — NC Insights Dashboard"
+APP_TITLE = "🧭 Digital — NC Insights Dashboard"
 APP_SUB   = "SJCPL visual theme · Roboto · Brand colors only"
 HEADER_BG = f"linear-gradient(90deg, {BLACK} 0%, {BLUE} 100%)"
 st.markdown(f"""
