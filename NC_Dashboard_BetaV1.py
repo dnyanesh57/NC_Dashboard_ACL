@@ -18,6 +18,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import json
+import urllib.request, urllib.error
 
 # ---------- Safe Styler import (older pandas compatible) ----------
 try:
@@ -521,21 +523,70 @@ def normalize_colname(c: str) -> str:
     s = str(c).replace("\u2013", "-").replace("\u2014", "-").replace("\u00A0", " ")
     s = re.sub(r"\s+", " ", s).strip()
     return s
+# Auto-pick the latest CSV from GitHub repo folder `data/`
+GITHUB_OWNER = "dnyanesh57"
+GITHUB_REPO  = "NC_Dashboard"
+GITHUB_DIR   = "data"
+
+def _latest_github_raw_url(prefix: str = "CSV-INSTRUCTION-DETAIL-REPORT-", suffix: str = ".csv") -> Optional[str]:
+    """
+    Lists files in GitHub repo /data via the public API and returns the raw URL of the newest
+    CSV-INSTRUCTION-DETAIL-REPORT-*.csv file, based on the timestamp embedded in the filename:
+    CSV-INSTRUCTION-DETAIL-REPORT-MM-DD-YYYY-HH-MM-SS.csv
+    """
+    api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{GITHUB_DIR}"
+    try:
+        with urllib.request.urlopen(api_url, timeout=8) as resp:
+            data = json.load(resp)
+        files: List[Tuple[dt.datetime, str]] = []
+
+        # Example: CSV-INSTRUCTION-DETAIL-REPORT-09-10-2025-09-12-02.csv
+        pat = re.compile(
+            rf"^{re.escape(prefix)}(\d{{2}})-(\d{{2}})-(\d{{4}})-(\d{{2}})-(\d{{2}})-(\d{{2}}){re.escape(suffix)}$"
+        )
+        for item in data:
+            if item.get("type") != "file":
+                continue
+            name = item.get("name", "")
+            m = pat.match(name)
+            if not m:
+                continue
+            mo, dy, yr, hh, mm, ss = map(int, m.groups())
+            try:
+                ts = dt.datetime(yr, mo, dy, hh, mm, ss)
+                files.append((ts, name))
+            except Exception:
+                continue
+
+        if not files:
+            return None
+        latest_name = max(files, key=lambda x: x[0])[1]
+        return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/main/{GITHUB_DIR}/{latest_name}"
+    except Exception:
+        return None
 
 def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
     """
     Robust reader:
-      - If file is None: pull demo CSV from GitHub
+      - If file is None: auto-pick the latest CSV from GitHub /data (by timestamp in filename)
       - Else: try Excel, else CSV with multiple encodings
       - Normalize column names and drop duplicate columns
     """
     if file is None:
-        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-15-2025-09-30-25.csv"
+        # Fallback path (kept from your code; used if auto-pick fails)
+        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-10-2025-09-12-02.csv"
         try:
-            df = pd.read_csv(default_path)
+            url = _latest_github_raw_url()
+            if url:
+                df = pd.read_csv(url)
+            else:
+                df = pd.read_csv(default_path)
         except Exception:
-            st.error("No file uploaded and demo CSV not available.")
-            st.stop()
+            try:
+                df = pd.read_csv(default_path)
+            except Exception:
+                st.error("No file uploaded and demo CSV not available.")
+                st.stop()
     else:
         name = getattr(file, "name", "uploaded.csv").lower()
         if name.endswith(".xlsx") or name.endswith(".xls"):
@@ -551,9 +602,11 @@ def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
             else:
                 st.error("Could not read the uploaded CSV with common encodings.")
                 st.stop()
+
     df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
     df = df.loc[:, ~pd.Series(df.columns).duplicated().values]
     return df
+
 
 @st.cache_data(show_spinner=False)
 def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
