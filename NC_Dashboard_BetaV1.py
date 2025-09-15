@@ -609,10 +609,22 @@ def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
     df.columns = [c.strip() for c in df.columns]
+
+    # >>> NEW: Ignore all rows from TRAINING PROJECT (case/space-insensitive)
+    if "Project Name" in df.columns:
+        df = df[~df["Project Name"]
+                .astype(str)
+                .str.strip()
+                .str.casefold()
+                .eq("training project")].copy()
+    # <<< NEW
+
     return add_derived_columns(df)
+
 
 if uploaded is not None:
     df_raw = load_data(uploaded)
