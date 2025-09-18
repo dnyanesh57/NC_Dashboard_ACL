@@ -1535,14 +1535,37 @@ with tabs[8]:
         else:
             # Selectbox remains typeable and shows the rich label; value is index of the row
             # Use index to keep it stable even if duplicate refs exist
-            opt_df = opt_df.reset_index(drop=False).rename(columns={"index": "_idx"})
-            sel_idx = st.selectbox(
+  # ---- Build a rich, typeable selector ----
+            opt_df = df_scope.copy()
+            opt_df["_label"] = opt_df.apply(_mk_label, axis=1)
+
+            # Keep the original index as a stable key for selection
+            opt_df = opt_df.reset_index().rename(columns={"index": "_idx"})
+
+            # Free-text search narrowing (unchanged)
+            q = st.text_input("Search NC (by ref / project / type / location / description)", value="", key="nc-search").strip().lower()
+            if q:
+                mask = opt_df["_label"].str.lower().str.contains(q, na=False)
+                opt_df = opt_df[mask]
+
+            if len(opt_df) == 0:
+                st.info("No NCs match your search and filters.")
+            else:
+                sel_idx = st.selectbox(
                 "Select an NC",
                 options=opt_df["_idx"].tolist(),
                 format_func=lambda i: opt_df.loc[opt_df["_idx"] == i, "_label"].values[0],
                 key="nc-ref"
-            )
-            row = df_scope.iloc[sel_idx:sel_idx+1]  # single-row DataFrame slice
+        )
+
+             # ✅ FIX: use label-based selection, not position-based
+            try:
+                row = df_scope.loc[[sel_idx]].copy()
+            except KeyError:
+                # Fallback if indexes got altered elsewhere
+                fallback = opt_df[opt_df["_idx"] == sel_idx]
+                row = fallback.drop(columns=["_idx", "_label"]).iloc[[0]].copy()
+
     else:
         st.info("No Reference IDs available in current filters.")
         row = pd.DataFrame()
