@@ -1494,15 +1494,16 @@ with tabs[7]:
 
 # ---------- NC-View ----------
 # ---------- NC-View ----------
+# ---------- NC-View ----------
 with tabs[8]:
     st.header("NC-View")
 
     # ---- Scope by project (optional) ----
     proj_opts = sorted(df_filtered.get("Project Name", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-    sel_proj = st.selectbox("Filter by Project (optional)", ["(All)"] + proj_opts, index=0, key="nc-proj")
+    sel_proj = st.selectbox("Filter by Project (optional)", ["(All)"] + proj_opts, index=0, key="nc-proj-ncview")
     df_scope = df_filtered if sel_proj == "(All)" else df_filtered[df_filtered.get("Project Name", "").astype(str) == sel_proj]
 
-    # ---- Build a rich, typeable selector ----
+    # ---- Helpers (local to tab) ----
     def _short(s, n=80):
         if pd.isna(s): return "—"
         s = str(s).strip()
@@ -1516,7 +1517,6 @@ with tabs[8]:
         locv = str(r.get("Location Variable (Fixed)", r.get("Location Variable", "—")))
         desc = _short(r.get("Description", "—"), 70)
         bits = [ref, proj, f"{t1}/{t2}", locv, desc]
-        # Join with " — " but suppress trailing empties nicely
         return " — ".join([b for b in bits if b and b != "—"])
 
     if "Reference ID" in df_scope.columns and len(df_scope):
@@ -1524,48 +1524,37 @@ with tabs[8]:
         opt_df = df_scope.copy()
         opt_df["_label"] = opt_df.apply(_mk_label, axis=1)
 
-        # Free-text search to narrow down (typable input)
-        q = st.text_input("Search NC (by ref / project / type / location / description)", value="", key="nc-search").strip().lower()
+        # Preserve the original index as a stable selection key
+        opt_df = opt_df.reset_index().rename(columns={"index": "_idx"})
+
+        # Free-text search to narrow down (typable input) — unique key to avoid conflicts
+        q = st.text_input(
+            "Search NC (by ref / project / type / location / description)",
+            value="",
+            key="nc-search-ncview"   # ✅ unique key
+        ).strip().lower()
+
         if q:
             mask = opt_df["_label"].str.lower().str.contains(q, na=False)
             opt_df = opt_df[mask]
 
         if len(opt_df) == 0:
             st.info("No NCs match your search and filters.")
+            row = pd.DataFrame()
         else:
-            # Selectbox remains typeable and shows the rich label; value is index of the row
-            # Use index to keep it stable even if duplicate refs exist
-  # ---- Build a rich, typeable selector ----
-            opt_df = df_scope.copy()
-            opt_df["_label"] = opt_df.apply(_mk_label, axis=1)
-
-            # Keep the original index as a stable key for selection
-            opt_df = opt_df.reset_index().rename(columns={"index": "_idx"})
-
-            # Free-text search narrowing (unchanged)
-            q = st.text_input("Search NC (by ref / project / type / location / description)", value="", key="nc-search").strip().lower()
-            if q:
-                mask = opt_df["_label"].str.lower().str.contains(q, na=False)
-                opt_df = opt_df[mask]
-
-            if len(opt_df) == 0:
-                st.info("No NCs match your search and filters.")
-            else:
-                sel_idx = st.selectbox(
+            sel_idx = st.selectbox(
                 "Select an NC",
                 options=opt_df["_idx"].tolist(),
                 format_func=lambda i: opt_df.loc[opt_df["_idx"] == i, "_label"].values[0],
-                key="nc-ref"
-        )
-
-             # ✅ FIX: use label-based selection, not position-based
+                key="nc-ref-ncview"   # ✅ unique key
+            )
+            # ✅ FIX: label-based selection (not iloc)
             try:
                 row = df_scope.loc[[sel_idx]].copy()
             except KeyError:
-                # Fallback if indexes got altered elsewhere
+                # Fallback if indexes changed elsewhere
                 fallback = opt_df[opt_df["_idx"] == sel_idx]
                 row = fallback.drop(columns=["_idx", "_label"]).iloc[[0]].copy()
-
     else:
         st.info("No Reference IDs available in current filters.")
         row = pd.DataFrame()
@@ -1596,7 +1585,7 @@ with tabs[8]:
             f"Effective: {_fmt_dt(r.get('_EffectiveResolutionDT'))}"
         )
 
-        # Key commentary & roles (cards)
+        # Cards
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("##### 📝 Description")
@@ -1620,14 +1609,14 @@ with tabs[8]:
             st.markdown("##### 🗺️ Location")
             loc_lines = []
             for c in ["Location / Reference", "Location Variable (Fixed)", "Location L0", "Location L1", "Location L2", "Location L3"]:
-                if c in row.index:
+                if c in row.columns:
                     loc_lines.append(f"**{c}:** {r.get(c, '—')}")
             st.write("\n\n".join(loc_lines) if loc_lines else "—")
 
             st.markdown("##### 🏷️ Types & Tags")
             type_lines = []
             for c in ["Type L0", "Type L1", "Type L2", "Tag 1", "Tag 2"]:
-                if c in row.index:
+                if c in row.columns:
                     type_lines.append(f"**{c}:** {r.get(c, '—')}")
             st.write("\n\n".join(type_lines) if type_lines else "—")
 
@@ -1638,8 +1627,7 @@ with tabs[8]:
 
         st.divider()
 
-        # Keep your original visuals (event strip, Gantt, step, SLA bullet)
-        # Event strip
+        # ---- Event strip ----
         events = []
         for name, col, color in [
             ("Raised", "_RaisedOnDT", GREY),
@@ -1662,11 +1650,11 @@ with tabs[8]:
             ))
             fig_ev.update_yaxes(visible=False)
             fig_ev.update_layout(title="Event Strip", xaxis_title="", height=220)
-            show_chart(style_fig(fig_ev, theme), key="nc-events")
+            show_chart(style_fig(fig_ev, theme), key="nc-events-ncview")
         else:
             st.info("No timestamps available to draw the event strip.")
 
-        # Gantt segments
+        # ---- Gantt segments ----
         segs = []
         rs = r.get("_RaisedOnDT"); rp = r.get("_RespondedOnDT"); ef = r.get("_EffectiveResolutionDT")
         if pd.notna(rs) and pd.notna(rp) and rp >= rs:
@@ -1677,15 +1665,18 @@ with tabs[8]:
             segs.append(dict(segment="Raised→Effective", start=pd.to_datetime(rs), finish=pd.to_datetime(ef)))
         if segs:
             tdf = pd.DataFrame(segs)
-            fig_tl = px.timeline(tdf, x_start="start", x_end="finish", y="segment",
-                                 color="segment", color_discrete_sequence=distinct_brand_colors(len(tdf["segment"].unique())))
+            fig_tl = px.timeline(
+                tdf, x_start="start", x_end="finish", y="segment",
+                color="segment",
+                color_discrete_sequence=distinct_brand_colors(len(tdf["segment"].unique()))
+            )
             fig_tl.update_yaxes(autorange="reversed")
             fig_tl.update_layout(title="Gantt (segments)", height=250, showlegend=False)
-            show_chart(style_fig(fig_tl, theme), key="nc-gantt")
+            show_chart(style_fig(fig_tl, theme), key="nc-gantt-ncview")
         else:
             st.info("Not enough timestamps to render Gantt segments.")
 
-        # Status step chart
+        # ---- Status step chart ----
         steps = []
         if pd.notna(rs): steps.append(("Raised", pd.to_datetime(rs), 0))
         if pd.notna(rp) and pd.notna(rs) and rp >= rs: steps.append(("Responded", pd.to_datetime(rp), 1))
@@ -1706,41 +1697,42 @@ with tabs[8]:
                 ticktext=["Raised","Responded","Rejected","Closed","Effective"]
             )
             fig_step.update_layout(title="Status Step Chart", height=260)
-            show_chart(style_fig(fig_step, theme), key="nc-step")
+            show_chart(style_fig(fig_step, theme), key="nc-step-ncview")
         else:
             st.info("Not enough events to render a step chart.")
 
-        # SLA bullet
-        dl = r.get("_DeadlineDT"); ef = r.get("_EffectiveResolutionDT")
-        if pd.notna(rs) and (pd.notna(dl) or pd.notna(ef)):
+        # ---- SLA bullet ----
+        dl = r.get("_DeadlineDT"); efv = r.get("_EffectiveResolutionDT")
+        if pd.notna(rs) and (pd.notna(dl) or pd.notna(efv)):
             base = pd.to_datetime(rs)
             dl_hours = (pd.to_datetime(dl) - base).total_seconds()/3600 if pd.notna(dl) else None
-            ef_hours = (pd.to_datetime(ef) - base).total_seconds()/3600 if pd.notna(ef) else None
+            ef_hours = (pd.to_datetime(efv) - base).total_seconds()/3600 if pd.notna(efv) else None
             bars = []
             if dl_hours is not None: bars.append(("Deadline", max(0, dl_hours)))
             if ef_hours is not None: bars.append(("Actual", max(0, ef_hours)))
             if bars:
                 bdf = pd.DataFrame(bars, columns=["Metric","Hours"])
-                fig_b = px.bar(bdf, x="Hours", y="Metric", orientation="h",
-                               title="SLA — Deadline vs Actual (hours)",
-                               color="Metric",
-                               color_discrete_sequence=[GREY, BLACK],
-                               text_auto=True)
-                show_chart(style_fig(fig_b, theme), key="nc-sla-bullet")
+                fig_b = px.bar(
+                    bdf, x="Hours", y="Metric", orientation="h",
+                    title="SLA — Deadline vs Actual (hours)",
+                    color="Metric",
+                    color_discrete_sequence=[GREY, BLACK],
+                    text_auto=True
+                )
+                show_chart(style_fig(fig_b, theme), key="nc-sla-bullet-ncview")
         else:
             st.info("No SLA/Effective times available for bullet chart.")
 
         st.divider()
         # ---- All raw fields (one-stop detail view) ----
         with st.expander("All fields (raw)"):
-            # transpose pretty: two columns if many fields
             raw_series = r.copy()
-            # Convert datetimes to readable strings
             for c in raw_series.index:
                 v = raw_series[c]
-                if pd.api.types.is_datetime64_any_dtype(type(v)) or isinstance(v, pd.Timestamp):
+                # stringify datetimes for readability
+                if isinstance(v, (pd.Timestamp, np.datetime64)):
                     raw_series[c] = _fmt_dt(v)
-            # Show as a two-column markdown table for readability
+            # Split into two columns for readability
             keys = list(raw_series.index)
             half = (len(keys) + 1) // 2
             left_keys, right_keys = keys[:half], keys[half:]
@@ -1753,6 +1745,7 @@ with tabs[8]:
                     st.markdown(f"**{k}:**  {raw_series.get(k, '—')}")
     else:
         st.info("Select an NC to view details.")
+
 
 # ---------- Sketch-View (Treemap) ----------
 with tabs[9]:
