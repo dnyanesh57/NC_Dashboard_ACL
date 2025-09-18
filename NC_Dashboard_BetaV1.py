@@ -873,10 +873,15 @@ with tabs[1]:
         pct = (count_changed/total_in_scope*100.0) if total_in_scope else 0.0
         st.metric("% of Filtered NCs", f"{pct:.1f}%")
     with cx:
+        # ... after you compute `changed` and `count_changed`:
         if count_changed and changed["_LastStatusChangeDT"].notna().any():
-            age_hrs = (now - changed["_LastStatusChangeDT"]).dt.total_seconds()/3600.0
+            age_hrs = (now - changed["_LastStatusChangeDT"]).dt.total_seconds() / 3600.0
+            # ✅ clamp negatives to 0 and ignore non-finite
+            age_hrs = np.where(np.isfinite(age_hrs), np.maximum(age_hrs, 0.0), np.nan)
             med = np.nanmedian(age_hrs) if np.isfinite(age_hrs).any() else np.nan
             st.metric("Median hrs since change", f"{med:.1f}" if pd.notna(med) else "—")
+        else:
+            st.metric("Median hrs since change", "—")
 
     # KPIs for R2C & Responded-not-Closed within window
     if count_changed:
