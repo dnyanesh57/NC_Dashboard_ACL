@@ -11,6 +11,7 @@ from sqlalchemy import (
     create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, UniqueConstraint, select, func
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from sqlalchemy import inspect
 
 try:
     import streamlit as st  # type: ignore
@@ -186,6 +187,13 @@ def get_session() -> Session:
 
 def init_db(seed_admin: bool = True) -> None:
     engine = get_engine()
+
+    # Attempt to repair any partially-created/misconfigured tables from prior runs
+    try:
+        _repair_incorrect_tables(engine)
+    except Exception:
+        pass
+
     Base.metadata.create_all(engine)
     # Seed visualizations
     with get_session() as s:
@@ -209,6 +217,24 @@ def init_db(seed_admin: bool = True) -> None:
                 pass
         if admin_email and admin_password:
             ensure_admin(admin_email, admin_password, admin_name or "Admin")
+
+
+def _repair_incorrect_tables(engine) -> None:
+    """Drop known broken artifacts to allow a clean create_all.
+    Specifically handles the case where 'acl_users' exists without an 'id' column.
+    Safe to run repeatedly.
+    """
+    insp = inspect(engine)
+    existing = set(insp.get_table_names())
+    if "acl_users" in existing:
+        try:
+            cols = [c.get("name") for c in insp.get_columns("acl_users")]
+        except Exception:
+            cols = []
+        if "id" not in cols:
+            # Drop the malformed table and any dependents
+            with engine.begin() as conn:
+                conn.exec_driver_sql("DROP TABLE IF EXISTS acl_users CASCADE")
 
 
 def list_sites() -> List[Dict]:
