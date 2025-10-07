@@ -27,7 +27,7 @@ Base = declarative_base()
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "acl_users"
     id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
@@ -42,7 +42,7 @@ class User(Base):
 
 
 class Group(Base):
-    __tablename__ = "groups"
+    __tablename__ = "acl_groups"
     id = Column(Integer, primary_key=True)
     name = Column(String(100), unique=True, nullable=False)
 
@@ -51,10 +51,10 @@ class Group(Base):
 
 
 class UserGroup(Base):
-    __tablename__ = "user_groups"
+    __tablename__ = "acl_user_groups"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("acl_users.id", ondelete="CASCADE"), nullable=False)
+    group_id = Column(Integer, ForeignKey("acl_groups.id", ondelete="CASCADE"), nullable=False)
     __table_args__ = (UniqueConstraint('user_id', 'group_id', name='uq_user_group'),)
 
     user = relationship("User", back_populates="groups")
@@ -62,7 +62,7 @@ class UserGroup(Base):
 
 
 class Visualization(Base):
-    __tablename__ = "visualizations"
+    __tablename__ = "acl_visualizations"
     id = Column(Integer, primary_key=True)
     key = Column(String(100), unique=True, nullable=False)  # e.g., 'overview', 'status', ...
     name = Column(String(255), nullable=False)
@@ -73,10 +73,10 @@ class Visualization(Base):
 
 
 class UserVisualization(Base):
-    __tablename__ = "user_visualizations"
+    __tablename__ = "acl_user_visualizations"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    viz_id = Column(Integer, ForeignKey("visualizations.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("acl_users.id", ondelete="CASCADE"), nullable=False)
+    viz_id = Column(Integer, ForeignKey("acl_visualizations.id", ondelete="CASCADE"), nullable=False)
     allowed = Column(Boolean, default=True, nullable=False)
     __table_args__ = (UniqueConstraint('user_id', 'viz_id', name='uq_user_viz'),)
 
@@ -85,10 +85,10 @@ class UserVisualization(Base):
 
 
 class GroupVisualization(Base):
-    __tablename__ = "group_visualizations"
+    __tablename__ = "acl_group_visualizations"
     id = Column(Integer, primary_key=True)
-    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
-    viz_id = Column(Integer, ForeignKey("visualizations.id", ondelete="CASCADE"), nullable=False)
+    group_id = Column(Integer, ForeignKey("acl_groups.id", ondelete="CASCADE"), nullable=False)
+    viz_id = Column(Integer, ForeignKey("acl_visualizations.id", ondelete="CASCADE"), nullable=False)
     allowed = Column(Boolean, default=True, nullable=False)
     __table_args__ = (UniqueConstraint('group_id', 'viz_id', name='uq_group_viz'),)
 
@@ -97,9 +97,9 @@ class GroupVisualization(Base):
 
 
 class PasswordResetToken(Base):
-    __tablename__ = "password_reset_tokens"
+    __tablename__ = "acl_password_reset_tokens"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("acl_users.id", ondelete="CASCADE"), nullable=False)
     token = Column(String(255), unique=True, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False)
     used = Column(Boolean, default=False, nullable=False)
@@ -107,7 +107,7 @@ class PasswordResetToken(Base):
 
 
 class Site(Base):
-    __tablename__ = "sites"
+    __tablename__ = "acl_sites"
     id = Column(Integer, primary_key=True)
     key = Column(String(255), unique=True, nullable=False, index=True)  # expected to match 'Project Name'
     name = Column(String(255), nullable=False)
@@ -116,10 +116,10 @@ class Site(Base):
 
 
 class UserSite(Base):
-    __tablename__ = "user_sites"
+    __tablename__ = "acl_user_sites"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    site_id = Column(Integer, ForeignKey("sites.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("acl_users.id", ondelete="CASCADE"), nullable=False)
+    site_id = Column(Integer, ForeignKey("acl_sites.id", ondelete="CASCADE"), nullable=False)
     __table_args__ = (UniqueConstraint('user_id', 'site_id', name='uq_user_site'),)
 
     user = relationship("User")
