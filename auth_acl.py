@@ -56,7 +56,7 @@ class UserGroup(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("acl_users.id", ondelete="CASCADE"), nullable=False)
     group_id = Column(Integer, ForeignKey("acl_groups.id", ondelete="CASCADE"), nullable=False)
-    __table_args__ = (UniqueConstraint('user_id', 'group_id', name='uq_user_group'),)
+    __table_args__ = (UniqueConstraint('user_id', 'group_id'),)
 
     user = relationship("User", back_populates="groups")
     group = relationship("Group", back_populates="members")
@@ -79,7 +79,7 @@ class UserVisualization(Base):
     user_id = Column(Integer, ForeignKey("acl_users.id", ondelete="CASCADE"), nullable=False)
     viz_id = Column(Integer, ForeignKey("acl_visualizations.id", ondelete="CASCADE"), nullable=False)
     allowed = Column(Boolean, default=True, nullable=False)
-    __table_args__ = (UniqueConstraint('user_id', 'viz_id', name='uq_user_viz'),)
+    __table_args__ = (UniqueConstraint('user_id', 'viz_id'),)
 
     user = relationship("User", back_populates="user_viz")
     viz = relationship("Visualization", back_populates="user_binds")
@@ -91,7 +91,7 @@ class GroupVisualization(Base):
     group_id = Column(Integer, ForeignKey("acl_groups.id", ondelete="CASCADE"), nullable=False)
     viz_id = Column(Integer, ForeignKey("acl_visualizations.id", ondelete="CASCADE"), nullable=False)
     allowed = Column(Boolean, default=True, nullable=False)
-    __table_args__ = (UniqueConstraint('group_id', 'viz_id', name='uq_group_viz'),)
+    __table_args__ = (UniqueConstraint('group_id', 'viz_id'),)
 
     group = relationship("Group", back_populates="group_viz")
     viz = relationship("Visualization", back_populates="group_binds")
@@ -121,7 +121,7 @@ class UserSite(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("acl_users.id", ondelete="CASCADE"), nullable=False)
     site_id = Column(Integer, ForeignKey("acl_sites.id", ondelete="CASCADE"), nullable=False)
-    __table_args__ = (UniqueConstraint('user_id', 'site_id', name='uq_user_site'),)
+    __table_args__ = (UniqueConstraint('user_id', 'site_id'),)
 
     user = relationship("User")
     site = relationship("Site", back_populates="members")
