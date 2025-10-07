@@ -26,6 +26,17 @@ try:
 except Exception:
     auth_acl = None  # type: ignore
 
+# ---------- Streamlit compatibility helpers (early) ----------
+def _safe_rerun():
+    try:
+        fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+        if callable(fn):
+            fn()
+        else:
+            st.session_state["_force_rerun_nonce"] = st.session_state.get("_force_rerun_nonce", 0) + 1
+    except Exception:
+        pass
+
 # ---------- Access Control (login gate) ----------
 def _init_acl():
     if auth_acl is None:
@@ -578,6 +589,26 @@ def metrics_summary(df: pd.DataFrame, theme_name: str):
 APP_TITLE = "🧭 Digital — NC Insights Dashboard"
 APP_SUB   = "SJCPL visual theme · Roboto · Brand colors only"
 HEADER_BG = f"linear-gradient(90deg, {BLACK} 0%, {BLUE} 100%)"
+
+# Compute site access label for the current user (shown under the title)
+_auth_user = st.session_state.get("auth_user", {})
+_sites_label = "All Sites"
+try:
+    if _auth_user.get("role") and str(_auth_user.get("role")).lower() == "admin":
+        _sites_label = "All Sites"
+    else:
+        _allowed = set()
+        try:
+            if auth_acl is not None:
+                _allowed = set(auth_acl.allowed_sites_for(_auth_user.get("email", "")))
+        except Exception:
+            _allowed = set()
+        if _allowed:
+            _sites_label = " | ".join(sorted(str(s) for s in _allowed))
+        else:
+            _sites_label = "No Site Assigned"
+except Exception:
+    _sites_label = "All Sites"
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
@@ -598,6 +629,7 @@ div#sj-titlebar p {{ margin-top: 4px; opacity: .9; }}
 <div id="sj-titlebar">
   <h1>{APP_TITLE}</h1>
   <p>{APP_SUB}</p>
+  <p><strong>Site Access:</strong> {_sites_label}</p>
 </div>
 """, unsafe_allow_html=True)
 
