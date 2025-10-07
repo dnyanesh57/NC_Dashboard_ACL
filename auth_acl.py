@@ -19,9 +19,14 @@ except Exception:  # pragma: no cover - fallback when not running in Streamlit
     st = None  # type: ignore
 
 try:
-    from passlib.hash import bcrypt
+    from passlib.hash import bcrypt as passlib_bcrypt
 except Exception:  # pragma: no cover
-    bcrypt = None  # type: ignore
+    passlib_bcrypt = None  # type: ignore
+
+try:
+    import bcrypt as pyca_bcrypt  # pyca/bcrypt
+except Exception:  # pragma: no cover
+    pyca_bcrypt = None  # type: ignore
 
 
 Base = declarative_base()
@@ -328,18 +333,31 @@ def allowed_sites_for(user_email: str) -> Set[str]:
 
 
 def _hash_password(password: str) -> str:
-    if not bcrypt:
-        raise RuntimeError("passlib[bcrypt] is required. Please add to requirements.txt")
-    return bcrypt.hash(password)
+    # Prefer passlib for portability; fallback to pyca/bcrypt
+    try:
+        if passlib_bcrypt is not None:
+            return passlib_bcrypt.hash(password)
+    except Exception:
+        pass
+    if pyca_bcrypt is not None:
+        return pyca_bcrypt.hashpw(password.encode("utf-8"), pyca_bcrypt.gensalt()).decode("utf-8")
+    raise RuntimeError("bcrypt backend not available (install passlib[bcrypt] or bcrypt)")
 
 
 def _verify_password(password: str, password_hash: str) -> bool:
-    if not bcrypt:
-        raise RuntimeError("passlib[bcrypt] is required. Please add to requirements.txt")
+    # Try passlib first
     try:
-        return bcrypt.verify(password, password_hash)
+        if passlib_bcrypt is not None:
+            return passlib_bcrypt.verify(password, password_hash)
     except Exception:
-        return False
+        pass
+    # Fallback to pyca/bcrypt direct check for $2*$ hashes
+    try:
+        if pyca_bcrypt is not None and password_hash and password_hash.startswith("$2"):
+            return pyca_bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:
+        pass
+    return False
 
 
 def ensure_admin(email: str, password: str, name: str = "Admin") -> None:
