@@ -18,6 +18,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+<<<<<<< HEAD
 from typing import Dict
 
 # ---------- Auth / ACL imports ----------
@@ -95,6 +96,10 @@ _auth_ui()
 if not st.session_state.get("auth_user"):
     st.info("Please log in to view the dashboard.")
     st.stop()
+=======
+import json
+import urllib.request, urllib.error
+>>>>>>> 74664b11aab03dd245b822cfb63f096058244b92
 
 # ---------- Safe Styler import (older pandas compatible) ----------
 try:
@@ -600,21 +605,70 @@ def normalize_colname(c: str) -> str:
     s = str(c).replace("\u2013", "-").replace("\u2014", "-").replace("\u00A0", " ")
     s = re.sub(r"\s+", " ", s).strip()
     return s
+# Auto-pick the latest CSV from GitHub repo folder `data/`
+GITHUB_OWNER = "dnyanesh57"
+GITHUB_REPO  = "NC_Dashboard"
+GITHUB_DIR   = "data"
+
+def _latest_github_raw_url(prefix: str = "CSV-INSTRUCTION-DETAIL-REPORT-", suffix: str = ".csv") -> Optional[str]:
+    """
+    Lists files in GitHub repo /data via the public API and returns the raw URL of the newest
+    CSV-INSTRUCTION-DETAIL-REPORT-*.csv file, based on the timestamp embedded in the filename:
+    CSV-INSTRUCTION-DETAIL-REPORT-MM-DD-YYYY-HH-MM-SS.csv
+    """
+    api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{GITHUB_DIR}"
+    try:
+        with urllib.request.urlopen(api_url, timeout=8) as resp:
+            data = json.load(resp)
+        files: List[Tuple[dt.datetime, str]] = []
+
+        # Example: CSV-INSTRUCTION-DETAIL-REPORT-09-10-2025-09-12-02.csv
+        pat = re.compile(
+            rf"^{re.escape(prefix)}(\d{{2}})-(\d{{2}})-(\d{{4}})-(\d{{2}})-(\d{{2}})-(\d{{2}}){re.escape(suffix)}$"
+        )
+        for item in data:
+            if item.get("type") != "file":
+                continue
+            name = item.get("name", "")
+            m = pat.match(name)
+            if not m:
+                continue
+            mo, dy, yr, hh, mm, ss = map(int, m.groups())
+            try:
+                ts = dt.datetime(yr, mo, dy, hh, mm, ss)
+                files.append((ts, name))
+            except Exception:
+                continue
+
+        if not files:
+            return None
+        latest_name = max(files, key=lambda x: x[0])[1]
+        return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/main/{GITHUB_DIR}/{latest_name}"
+    except Exception:
+        return None
 
 def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
     """
     Robust reader:
-      - If file is None: pull demo CSV from GitHub
+      - If file is None: auto-pick the latest CSV from GitHub /data (by timestamp in filename)
       - Else: try Excel, else CSV with multiple encodings
       - Normalize column names and drop duplicate columns
     """
     if file is None:
-        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
+        # Fallback path (kept from your code; used if auto-pick fails)
+        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-10-2025-09-12-02.csv"
         try:
-            df = pd.read_csv(default_path)
+            url = _latest_github_raw_url()
+            if url:
+                df = pd.read_csv(url)
+            else:
+                df = pd.read_csv(default_path)
         except Exception:
-            st.error("No file uploaded and demo CSV not available.")
-            st.stop()
+            try:
+                df = pd.read_csv(default_path)
+            except Exception:
+                st.error("No file uploaded and demo CSV not available.")
+                st.stop()
     else:
         name = getattr(file, "name", "uploaded.csv").lower()
         if name.endswith(".xlsx") or name.endswith(".xls"):
@@ -630,15 +684,29 @@ def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
             else:
                 st.error("Could not read the uploaded CSV with common encodings.")
                 st.stop()
+
     df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
     df = df.loc[:, ~pd.Series(df.columns).duplicated().values]
     return df
 
-@st.cache_data(show_spinner=False)
+
 def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
     df.columns = [c.strip() for c in df.columns]
+
+    # >>> UPDATED: Ignore TRAINING PROJECT and SJ TRaining Project
+    if "Project Name" in df.columns:
+        ignored_projects = {"training project", "sj training project"}
+        _pn = (df["Project Name"]
+               .astype(str)
+               .str.replace(r"\s+", " ", regex=True)
+               .str.strip()
+               .str.casefold())
+        df = df[~_pn.isin(ignored_projects)].copy()
+    # <<< UPDATED
+
     return add_derived_columns(df)
+
 
 if uploaded is not None:
     df_raw = load_data(uploaded)
@@ -1194,10 +1262,15 @@ with tabs[1]:
         pct = (count_changed/total_in_scope*100.0) if total_in_scope else 0.0
         st.metric("% of Filtered NCs", f"{pct:.1f}%")
     with cx:
+        # ... after you compute `changed` and `count_changed`:
         if count_changed and changed["_LastStatusChangeDT"].notna().any():
-            age_hrs = (now - changed["_LastStatusChangeDT"]).dt.total_seconds()/3600.0
+            age_hrs = (now - changed["_LastStatusChangeDT"]).dt.total_seconds() / 3600.0
+            # ✅ clamp negatives to 0 and ignore non-finite
+            age_hrs = np.where(np.isfinite(age_hrs), np.maximum(age_hrs, 0.0), np.nan)
             med = np.nanmedian(age_hrs) if np.isfinite(age_hrs).any() else np.nan
             st.metric("Median hrs since change", f"{med:.1f}" if pd.notna(med) else "—")
+        else:
+            st.metric("Median hrs since change", "—")
 
     # KPIs for R2C & Responded-not-Closed within window
     if count_changed:
@@ -1815,15 +1888,16 @@ with tabs[7]:
 
 # ---------- NC-View ----------
 # ---------- NC-View ----------
+# ---------- NC-View ----------
 with tabs[8]:
     st.header("NC-View")
 
     # ---- Scope by project (optional) ----
     proj_opts = sorted(df_filtered.get("Project Name", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-    sel_proj = st.selectbox("Filter by Project (optional)", ["(All)"] + proj_opts, index=0, key="nc-proj")
+    sel_proj = st.selectbox("Filter by Project (optional)", ["(All)"] + proj_opts, index=0, key="nc-proj-ncview")
     df_scope = df_filtered if sel_proj == "(All)" else df_filtered[df_filtered.get("Project Name", "").astype(str) == sel_proj]
 
-    # ---- Build a rich, typeable selector ----
+    # ---- Helpers (local to tab) ----
     def _short(s, n=80):
         if pd.isna(s): return "—"
         s = str(s).strip()
@@ -1837,7 +1911,6 @@ with tabs[8]:
         locv = str(r.get("Location Variable (Fixed)", r.get("Location Variable", "—")))
         desc = _short(r.get("Description", "—"), 70)
         bits = [ref, proj, f"{t1}/{t2}", locv, desc]
-        # Join with " — " but suppress trailing empties nicely
         return " — ".join([b for b in bits if b and b != "—"])
 
     if "Reference ID" in df_scope.columns and len(df_scope):
@@ -1845,25 +1918,37 @@ with tabs[8]:
         opt_df = df_scope.copy()
         opt_df["_label"] = opt_df.apply(_mk_label, axis=1)
 
-        # Free-text search to narrow down (typable input)
-        q = st.text_input("Search NC (by ref / project / type / location / description)", value="", key="nc-search").strip().lower()
+        # Preserve the original index as a stable selection key
+        opt_df = opt_df.reset_index().rename(columns={"index": "_idx"})
+
+        # Free-text search to narrow down (typable input) — unique key to avoid conflicts
+        q = st.text_input(
+            "Search NC (by ref / project / type / location / description)",
+            value="",
+            key="nc-search-ncview"   # ✅ unique key
+        ).strip().lower()
+
         if q:
             mask = opt_df["_label"].str.lower().str.contains(q, na=False)
             opt_df = opt_df[mask]
 
         if len(opt_df) == 0:
             st.info("No NCs match your search and filters.")
+            row = pd.DataFrame()
         else:
-            # Selectbox remains typeable and shows the rich label; value is index of the row
-            # Use index to keep it stable even if duplicate refs exist
-            opt_df = opt_df.reset_index(drop=False).rename(columns={"index": "_idx"})
             sel_idx = st.selectbox(
                 "Select an NC",
                 options=opt_df["_idx"].tolist(),
                 format_func=lambda i: opt_df.loc[opt_df["_idx"] == i, "_label"].values[0],
-                key="nc-ref"
+                key="nc-ref-ncview"   # ✅ unique key
             )
-            row = df_scope.iloc[sel_idx:sel_idx+1]  # single-row DataFrame slice
+            # ✅ FIX: label-based selection (not iloc)
+            try:
+                row = df_scope.loc[[sel_idx]].copy()
+            except KeyError:
+                # Fallback if indexes changed elsewhere
+                fallback = opt_df[opt_df["_idx"] == sel_idx]
+                row = fallback.drop(columns=["_idx", "_label"]).iloc[[0]].copy()
     else:
         st.info("No Reference IDs available in current filters.")
         row = pd.DataFrame()
@@ -1894,7 +1979,7 @@ with tabs[8]:
             f"Effective: {_fmt_dt(r.get('_EffectiveResolutionDT'))}"
         )
 
-        # Key commentary & roles (cards)
+        # Cards
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("##### 📝 Description")
@@ -1918,14 +2003,14 @@ with tabs[8]:
             st.markdown("##### 🗺️ Location")
             loc_lines = []
             for c in ["Location / Reference", "Location Variable (Fixed)", "Location L0", "Location L1", "Location L2", "Location L3"]:
-                if c in row.index:
+                if c in row.columns:
                     loc_lines.append(f"**{c}:** {r.get(c, '—')}")
             st.write("\n\n".join(loc_lines) if loc_lines else "—")
 
             st.markdown("##### 🏷️ Types & Tags")
             type_lines = []
             for c in ["Type L0", "Type L1", "Type L2", "Tag 1", "Tag 2"]:
-                if c in row.index:
+                if c in row.columns:
                     type_lines.append(f"**{c}:** {r.get(c, '—')}")
             st.write("\n\n".join(type_lines) if type_lines else "—")
 
@@ -1936,8 +2021,7 @@ with tabs[8]:
 
         st.divider()
 
-        # Keep your original visuals (event strip, Gantt, step, SLA bullet)
-        # Event strip
+        # ---- Event strip ----
         events = []
         for name, col, color in [
             ("Raised", "_RaisedOnDT", GREY),
@@ -1960,11 +2044,11 @@ with tabs[8]:
             ))
             fig_ev.update_yaxes(visible=False)
             fig_ev.update_layout(title="Event Strip", xaxis_title="", height=220)
-            show_chart(style_fig(fig_ev, theme), key="nc-events")
+            show_chart(style_fig(fig_ev, theme), key="nc-events-ncview")
         else:
             st.info("No timestamps available to draw the event strip.")
 
-        # Gantt segments
+        # ---- Gantt segments ----
         segs = []
         rs = r.get("_RaisedOnDT"); rp = r.get("_RespondedOnDT"); ef = r.get("_EffectiveResolutionDT")
         if pd.notna(rs) and pd.notna(rp) and rp >= rs:
@@ -1975,15 +2059,18 @@ with tabs[8]:
             segs.append(dict(segment="Raised→Effective", start=pd.to_datetime(rs), finish=pd.to_datetime(ef)))
         if segs:
             tdf = pd.DataFrame(segs)
-            fig_tl = px.timeline(tdf, x_start="start", x_end="finish", y="segment",
-                                 color="segment", color_discrete_sequence=distinct_brand_colors(len(tdf["segment"].unique())))
+            fig_tl = px.timeline(
+                tdf, x_start="start", x_end="finish", y="segment",
+                color="segment",
+                color_discrete_sequence=distinct_brand_colors(len(tdf["segment"].unique()))
+            )
             fig_tl.update_yaxes(autorange="reversed")
             fig_tl.update_layout(title="Gantt (segments)", height=250, showlegend=False)
-            show_chart(style_fig(fig_tl, theme), key="nc-gantt")
+            show_chart(style_fig(fig_tl, theme), key="nc-gantt-ncview")
         else:
             st.info("Not enough timestamps to render Gantt segments.")
 
-        # Status step chart
+        # ---- Status step chart ----
         steps = []
         if pd.notna(rs): steps.append(("Raised", pd.to_datetime(rs), 0))
         if pd.notna(rp) and pd.notna(rs) and rp >= rs: steps.append(("Responded", pd.to_datetime(rp), 1))
@@ -2004,41 +2091,42 @@ with tabs[8]:
                 ticktext=["Raised","Responded","Rejected","Closed","Effective"]
             )
             fig_step.update_layout(title="Status Step Chart", height=260)
-            show_chart(style_fig(fig_step, theme), key="nc-step")
+            show_chart(style_fig(fig_step, theme), key="nc-step-ncview")
         else:
             st.info("Not enough events to render a step chart.")
 
-        # SLA bullet
-        dl = r.get("_DeadlineDT"); ef = r.get("_EffectiveResolutionDT")
-        if pd.notna(rs) and (pd.notna(dl) or pd.notna(ef)):
+        # ---- SLA bullet ----
+        dl = r.get("_DeadlineDT"); efv = r.get("_EffectiveResolutionDT")
+        if pd.notna(rs) and (pd.notna(dl) or pd.notna(efv)):
             base = pd.to_datetime(rs)
             dl_hours = (pd.to_datetime(dl) - base).total_seconds()/3600 if pd.notna(dl) else None
-            ef_hours = (pd.to_datetime(ef) - base).total_seconds()/3600 if pd.notna(ef) else None
+            ef_hours = (pd.to_datetime(efv) - base).total_seconds()/3600 if pd.notna(efv) else None
             bars = []
             if dl_hours is not None: bars.append(("Deadline", max(0, dl_hours)))
             if ef_hours is not None: bars.append(("Actual", max(0, ef_hours)))
             if bars:
                 bdf = pd.DataFrame(bars, columns=["Metric","Hours"])
-                fig_b = px.bar(bdf, x="Hours", y="Metric", orientation="h",
-                               title="SLA — Deadline vs Actual (hours)",
-                               color="Metric",
-                               color_discrete_sequence=[GREY, BLACK],
-                               text_auto=True)
-                show_chart(style_fig(fig_b, theme), key="nc-sla-bullet")
+                fig_b = px.bar(
+                    bdf, x="Hours", y="Metric", orientation="h",
+                    title="SLA — Deadline vs Actual (hours)",
+                    color="Metric",
+                    color_discrete_sequence=[GREY, BLACK],
+                    text_auto=True
+                )
+                show_chart(style_fig(fig_b, theme), key="nc-sla-bullet-ncview")
         else:
             st.info("No SLA/Effective times available for bullet chart.")
 
         st.divider()
         # ---- All raw fields (one-stop detail view) ----
         with st.expander("All fields (raw)"):
-            # transpose pretty: two columns if many fields
             raw_series = r.copy()
-            # Convert datetimes to readable strings
             for c in raw_series.index:
                 v = raw_series[c]
-                if pd.api.types.is_datetime64_any_dtype(type(v)) or isinstance(v, pd.Timestamp):
+                # stringify datetimes for readability
+                if isinstance(v, (pd.Timestamp, np.datetime64)):
                     raw_series[c] = _fmt_dt(v)
-            # Show as a two-column markdown table for readability
+            # Split into two columns for readability
             keys = list(raw_series.index)
             half = (len(keys) + 1) // 2
             left_keys, right_keys = keys[:half], keys[half:]
@@ -2051,6 +2139,7 @@ with tabs[8]:
                     st.markdown(f"**{k}:**  {raw_series.get(k, '—')}")
     else:
         st.info("Select an NC to view details.")
+
 
 # ---------- Sketch-View (Treemap) ----------
 with tabs[9]:
