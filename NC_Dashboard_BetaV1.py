@@ -47,7 +47,7 @@ def _auth_ui() -> Optional[Dict]:
             if st.button("Logout", type="secondary", key="btn-logout"):
                 st.session_state["auth_user"] = None
                 st.session_state.pop("allowed_viz", None)
-                st.experimental_rerun()
+                _safe_rerun()
             return user
         mode = st.radio("Access", ["Login", "Forgot Password", "Reset Password"], horizontal=True, key="auth-mode")
         if mode == "Login":
@@ -72,7 +72,7 @@ def _auth_ui() -> Optional[Dict]:
                     except Exception:
                         allowed = set()
                     st.session_state["allowed_viz"] = allowed
-                    st.experimental_rerun()
+                    _safe_rerun()
                 else:
                     st.error("Invalid credentials or inactive account.")
         elif mode == "Forgot Password":
@@ -2197,3 +2197,15 @@ with tabs[10]:
         st.download_button("⬇️ Download filtered table (CSV)", data=csv_data, file_name="digiqc_filtered.csv", mime="text/csv", key="dl-full-table")
 
 st.caption("© Digital Issue Dashboard — Streamlit (SJCPL Brand) — V2.7")
+# ---------- Streamlit compatibility helpers ----------
+def _safe_rerun():
+    try:
+        fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+        if callable(fn):
+            fn()
+        else:
+            # Fallback: toggle a session flag so Streamlit invalidates cache/state
+            st.session_state["_force_rerun_nonce"] = st.session_state.get("_force_rerun_nonce", 0) + 1
+    except Exception:
+        # Last resort: do nothing; page will update on next interaction
+        pass
