@@ -5,3 +5,6 @@ scikit-learn
 matplotlib
 plotly
 streamlit-plotly-events
+SQLAlchemy>=1.4
+psycopg2-binary
+passlib[bcrypt]

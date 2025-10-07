@@ -18,6 +18,83 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from typing import Dict
+
+# ---------- Auth / ACL imports ----------
+try:
+    import auth_acl  # local module for authentication/authorization
+except Exception:
+    auth_acl = None  # type: ignore
+
+# ---------- Access Control (login gate) ----------
+def _init_acl():
+    if auth_acl is None:
+        st.error("ACL module not available. Ensure 'auth_acl.py' exists.")
+        st.stop()
+    try:
+        auth_acl.init_db(seed_admin=True)
+    except Exception as e:
+        st.error(f"Database init failed: {e}")
+        st.stop()
+
+
+def _auth_ui() -> Optional[Dict]:
+    user = st.session_state.get("auth_user")
+    with st.sidebar:
+        st.markdown("### Account")
+        if user:
+            st.success(f"Logged in as {user.get('name')} ({user.get('role')})")
+            if st.button("Logout", type="secondary", key="btn-logout"):
+                st.session_state["auth_user"] = None
+                st.session_state.pop("allowed_viz", None)
+                st.experimental_rerun()
+            return user
+        mode = st.radio("Access", ["Login", "Forgot Password", "Reset Password"], horizontal=True, key="auth-mode")
+        if mode == "Login":
+            email = st.text_input("Email", key="auth-email")
+            pwd = st.text_input("Password", type="password", key="auth-pass")
+            if st.button("Login", type="primary", key="btn-login"):
+                try:
+                    u = auth_acl.authenticate(email, pwd)
+                except Exception as e:
+                    st.error(f"Login error: {e}")
+                    u = None
+                if u:
+                    st.session_state["auth_user"] = u
+                    try:
+                        allowed = auth_acl.allowed_visualizations_for(u["email"]) or set()
+                    except Exception:
+                        allowed = set()
+                    st.session_state["allowed_viz"] = allowed
+                    st.experimental_rerun()
+                else:
+                    st.error("Invalid credentials or inactive account.")
+        elif mode == "Forgot Password":
+            email = st.text_input("Email", key="fp-email")
+            if st.button("Send Reset Email", key="btn-fp"):
+                ok, token_or_msg = auth_acl.create_password_reset(email)
+                if ok:
+                    st.success("If the account exists, a reset email was sent. Keep this token for Reset Password.")
+                    st.code(token_or_msg)
+                else:
+                    st.error(token_or_msg)
+        else:  # Reset Password
+            token = st.text_input("Reset Token", key="rp-token")
+            newp = st.text_input("New Password", type="password", key="rp-new")
+            if st.button("Reset Password", key="btn-rp"):
+                ok, msg = auth_acl.reset_password_with_token(token, newp)
+                if ok:
+                    st.success("Password reset successful. Please login.")
+                else:
+                    st.error(msg)
+    return st.session_state.get("auth_user")
+
+
+_init_acl()
+_auth_ui()
+if not st.session_state.get("auth_user"):
+    st.info("Please log in to view the dashboard.")
+    st.stop()
 
 # ---------- Safe Styler import (older pandas compatible) ----------
 try:
@@ -375,14 +452,16 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     cur_status = _nz("Current Status").str.lower()
     closedish  = cur_status.str.contains(r"\b(closed|approved|resolved|complete)\b", regex=True)
+    currently_rejected = cur_status.eq("rejected")
     has_close_evidence = (
         df["_ClosedOnDT"].notna() | closedish |
         _nz("Closed By").ne("") | _nz("Closed Comment").ne("") |
         _nz("Closed On Date").ne("") | _nz("Closed On Time").ne("")
     )
-    df["_R2C_Flag"] = (has_reject_evidence & has_close_evidence).astype(int)
+    # Exclude records whose current status is 'Rejected' from R2C counting
+    df["_R2C_Flag"] = (has_reject_evidence & has_close_evidence & (~currently_rejected)).astype(int)
 
-    both_dt = df["_RejectedOnDT"].notna() & df["_ClosedOnDT"].notna()
+    both_dt = df["_RejectedOnDT"].notna() & df["_ClosedOnDT"].notna() & (~currently_rejected)
     df["_R2C_Strict_Flag"] = both_dt.astype(int)
     dur_hours = np.where(both_dt, (df["_ClosedOnDT"] - df["_RejectedOnDT"]).dt.total_seconds() / 3600.0, np.nan)
     df["R2C Hours (>=0)"] = np.where(np.isfinite(dur_hours), np.maximum(dur_hours, 0.0), np.nan)
@@ -568,6 +647,27 @@ else:
 
 df = preprocess(df_raw)
 
+# ---------- Site scope (Project Name) ----------
+_user_ctx = st.session_state.get("auth_user", {})
+if _user_ctx.get("role") != "admin":
+    try:
+        _allowed_sites = auth_acl.allowed_sites_for(_user_ctx.get("email", ""))
+    except Exception:
+        _allowed_sites = set()
+    st.session_state["allowed_sites"] = _allowed_sites
+    if "Project Name" in df.columns:
+        if _allowed_sites:
+            df = df[df["Project Name"].astype(str).isin([str(x) for x in _allowed_sites])]
+        else:
+            # If any sites are configured in DB and user has none, block data
+            try:
+                _has_sites = len(auth_acl.list_sites()) > 0
+            except Exception:
+                _has_sites = False
+            if _has_sites:
+                st.warning("No site assigned to your account. Please contact admin.")
+                st.stop()
+
 # ---------- Show logo if provided ----------
 st.markdown(
     f"""
@@ -645,7 +745,87 @@ r2c_count_scope     = int(mask_r2c_inferred.sum())
 resp_only_count     = int(mask_responly.sum())
 total_ncs_scope     = len(df_filtered)
 
-# ---------- Tabs (added "Status") ----------
+# ---------- User Dashboard (non-admin: single tab style) ----------
+from typing import Set
+
+def render_user_dashboard(df_all: pd.DataFrame, df_f: pd.DataFrame, theme_name: str, allowed_viz: Set[str]):
+    st.header("Dashboard")
+    # Overview
+    if "overview" in allowed_viz:
+        st.subheader("Overview")
+        try:
+            metrics_summary(df_f, theme_name)
+        except Exception:
+            pass
+        if "Current Status" in df_f.columns and len(df_f):
+            vc = df_f["Current Status"].value_counts(dropna=False).reset_index()
+            vc.columns = ["Current Status","Count"]
+            fig_sd = px.bar(vc, x="Current Status", y="Count", text_auto=True,
+                            color="Current Status", color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig_sd.update_xaxes(tickangle=0, tickfont=dict(size=11))
+            show_chart(style_fig(fig_sd, theme_name), key="usr-ov-status")
+
+    # Project Status (summary)
+    if "project_status" in allowed_viz and "Project Name" in df_f.columns:
+        st.subheader("Project Status (Summary)")
+        grp = df_f.groupby("Project Name").agg(
+            Total=("Reference ID","count") if "Reference ID" in df_f.columns else ("Project Name","count"),
+            Resolved=("_EffectiveResolutionDT", lambda x: x.notna().sum()),
+        ).reset_index()
+        st.dataframe(grp, use_container_width=True)
+        melted = grp.melt(id_vars=["Project Name"], value_vars=["Total","Resolved"], var_name="Metric", value_name="Count")
+        fig_proj = px.bar(melted, x="Project Name", y="Count", color="Metric", barmode="group",
+                          color_discrete_sequence=distinct_brand_colors(melted["Metric"].nunique()))
+        fig_proj.update_xaxes(tickangle=30, tickfont=dict(size=11))
+        show_chart(style_fig(fig_proj, theme_name), key="usr-proj")
+
+    # Project Explorer (basic)
+    if "project_explorer" in allowed_viz:
+        st.subheader("Project Explorer (Basic)")
+        for colname, key in [("Type L0","typeL0"), ("Type L1","typeL1"), ("Type L2","typeL2"), ("Current Status","status")]:
+            if colname in df_f.columns:
+                show_chart(bar_top_counts(df_f, colname, template=THEMES[theme_name]["template"], theme_name=theme_name),
+                           key=f"usr-pe-{key}")
+
+    # User-Wise (basic)
+    if "user_wise" in allowed_viz and "Assigned Team User" in df_f.columns:
+        st.subheader("User-Wise (Basic)")
+        usr = df_f.groupby("Assigned Team User").agg(
+            Total=("Reference ID","count") if "Reference ID" in df_f.columns else ("Assigned Team User","count"),
+            Resolved=("_EffectiveResolutionDT", lambda x: x.notna().sum()),
+        ).reset_index()
+        fig_u_total = px.bar(usr.sort_values("Total", ascending=False).head(25),
+                             x="Assigned Team User", y="Total", title="Top Assignees by Total",
+                             color_discrete_sequence=distinct_brand_colors(1))
+        fig_u_total.update_xaxes(tickangle=30)
+        show_chart(style_fig(fig_u_total, theme_name), key="usr-u-total")
+
+    # NC Table (basic)
+    if "nc_table" in allowed_viz:
+        st.subheader("NC Table")
+        show_cols = [c for c in [
+            "Reference ID","Project Name","Location / Reference","Location Variable (Fixed)",
+            "Type L0","Type L1","Type L2","Tag 1","Tag 2",
+            "Assigned Team","Assigned Team User","Current Status",
+            "Responding Time (Hrs)","Computed Closure Time (Hrs)"
+        ] if c in df_f.columns]
+        if show_cols:
+            st.dataframe(df_f[show_cols].head(1500), use_container_width=True)
+        else:
+            st.info("No known NC columns found.")
+
+
+# If non-admin, render single dashboard and stop
+_user = st.session_state.get("auth_user", {})
+if _user.get("role") != "admin":
+    allowed = st.session_state.get("allowed_viz", set())
+    if not allowed:
+        # Fallback: show at least overview if nothing assigned
+        allowed = {"overview"}
+    render_user_dashboard(df, df_filtered, theme, allowed)
+    st.stop()
+
+# ---------- Tabs (admin only; added "Status") ----------
 tabs = st.tabs([
     "Overview",
     "Status",
@@ -658,7 +838,213 @@ tabs = st.tabs([
     "NC-View",
     "Sketch-View",
     "NC Table",
+    "Admin",
 ])
+
+# ---------- Admin (User/Group/ACL Management) ----------
+with tabs[11]:
+    st.header("Admin")
+    _u = st.session_state.get("auth_user", {})
+    if _u.get("role") != "admin":
+        st.error("Admin access required.")
+    else:
+        st.markdown("Manage users, groups, and visualization access.")
+
+        admin_tabs = st.tabs(["Users", "Sites", "Groups", "Visualization Access"])
+
+        # Users
+        with admin_tabs[0]:
+            st.subheader("Users")
+            try:
+                _users = auth_acl.list_users()
+            except Exception as e:
+                _users = []
+                st.error(f"Failed to load users: {e}")
+            if _users:
+                st.dataframe(pd.DataFrame(_users)[[c for c in ["email","name","role","is_active","created_at"] if c in pd.DataFrame(_users).columns]], use_container_width=True)
+
+            st.markdown("### Add User")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                nu_email = st.text_input("Email", key="admin-new-email")
+            with c2:
+                nu_name = st.text_input("Name", key="admin-new-name")
+            with c3:
+                nu_role = st.selectbox("Role", ["user","admin"], index=0, key="admin-new-role")
+            with c4:
+                nu_pass = st.text_input("Temp Password", type="password", key="admin-new-pass")
+            if st.button("Create User", key="btn-admin-create-user"):
+                ok, msg = auth_acl.create_user(nu_email, nu_name, nu_pass, nu_role)
+                if ok:
+                    st.success(msg)
+                    st.experimental_rerun()
+                else:
+                    st.error(msg)
+
+            st.markdown("### Manage User")
+            emails = [u["email"] for u in _users] if _users else []
+            sel_user = st.selectbox("Select user", options=emails, key="admin-sel-user")
+            if sel_user:
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    if st.button("Activate", key="btn-activate-user"):
+                        ok, msg = auth_acl.set_active(sel_user, True)
+                        st.success(msg) if ok else st.error(msg)
+                with c2:
+                    if st.button("Deactivate", key="btn-deactivate-user"):
+                        ok, msg = auth_acl.set_active(sel_user, False)
+                        st.success(msg) if ok else st.error(msg)
+                with c3:
+                    newp = st.text_input("Set New Password", type="password", key="admin-set-pass")
+                    if st.button("Set Password", key="btn-set-pass") and newp:
+                        ok, msg = auth_acl.set_password(sel_user, newp)
+                        st.success(msg) if ok else st.error(msg)
+                with c4:
+                    if st.button("Send Reset Email", key="btn-send-reset"):
+                        ok, token = auth_acl.create_password_reset(sel_user)
+                        if ok:
+                            st.success("Reset email attempted; token shown below for reference")
+                            st.code(token)
+                        else:
+                            st.error(token)
+                st.divider()
+                if st.button("Delete User", key="btn-del-user"):
+                    ok, msg = auth_acl.delete_user(sel_user)
+                    if ok:
+                        st.success(msg)
+                        st.experimental_rerun()
+                    else:
+                        st.error(msg)
+
+        # Sites
+        with admin_tabs[1]:
+            st.subheader("Sites (Project Name scope)")
+            # List existing sites
+            try:
+                _sites = auth_acl.list_sites()
+            except Exception as e:
+                _sites = []
+                st.error(f"Failed to load sites: {e}")
+            if _sites:
+                st.dataframe(pd.DataFrame(_sites), use_container_width=True)
+
+            # Add sites from current data or manually
+            st.markdown("### Add Sites")
+            c1, c2 = st.columns([2,1])
+            with c1:
+                # From current dataset
+                proj_vals = sorted(pd.Series(dtype=str))
+                if "Project Name" in df.columns:
+                    proj_vals = sorted(df["Project Name"].dropna().astype(str).unique().tolist())
+                pick_sites = st.multiselect("From 'Project Name'", options=proj_vals, key="admin-pick-sites")
+            with c2:
+                manual_site = st.text_input("Manual site key", key="admin-manual-site")
+                if st.button("Add Manual Site", key="btn-add-manual-site") and manual_site:
+                    ok, msg = auth_acl.create_site(manual_site, manual_site)
+                    st.success(msg) if ok else st.error(msg)
+            if st.button("Add Selected Sites", key="btn-add-selected-sites") and pick_sites:
+                added = 0
+                for skey in pick_sites:
+                    ok, _ = auth_acl.create_site(skey, skey)
+                    if ok:
+                        added += 1
+                st.success(f"Added {added} sites (existing skipped).")
+
+            st.markdown("### Delete Site")
+            del_site = st.selectbox("Select site to delete", options=[s["key"] for s in (_sites or [])], key="admin-del-site")
+            if st.button("Delete Site", key="btn-del-site") and del_site:
+                ok, msg = auth_acl.delete_site(del_site)
+                st.success(msg) if ok else st.error(msg)
+
+            st.markdown("### Assign Users to Sites")
+            emails_all = [u["email"] for u in (_users or [])]
+            sel_u_site = st.selectbox("User", options=emails_all, key="admin-usr-site")
+            site_keys = [s["key"] for s in (_sites or [])]
+            # Show current assignments
+            current_user_sites = auth_acl.list_user_sites(sel_u_site) if sel_u_site else []
+            pick_user_sites = st.multiselect("Sites for user", options=site_keys, default=current_user_sites, key="admin-pick-user-sites")
+            if st.button("Save User Sites", key="btn-save-user-sites") and sel_u_site is not None:
+                # Apply as full replace: assign selected, unassign unselected
+                cur = set(current_user_sites)
+                new = set(pick_user_sites)
+                for sk in (new - cur):
+                    auth_acl.assign_user_to_site(sel_u_site, sk)
+                for sk in (cur - new):
+                    auth_acl.unassign_user_from_site(sel_u_site, sk)
+                st.success("User sites updated.")
+
+        # Groups
+        with admin_tabs[2]:
+            st.subheader("Groups")
+            try:
+                _groups = auth_acl.list_groups()
+            except Exception as e:
+                _groups = []
+                st.error(f"Failed to load groups: {e}")
+            if _groups:
+                st.dataframe(pd.DataFrame(_groups), use_container_width=True)
+            gcol1, gcol2 = st.columns(2)
+            with gcol1:
+                gname = st.text_input("New Group Name", key="admin-new-group")
+                if st.button("Create Group", key="btn-create-group") and gname:
+                    ok, msg = auth_acl.create_group(gname)
+                    st.success(msg) if ok else st.error(msg)
+            with gcol2:
+                gdel = st.selectbox("Delete Group", options=[g["name"] for g in _groups] if _groups else [], key="admin-del-group")
+                if st.button("Delete", key="btn-del-group") and gdel:
+                    ok, msg = auth_acl.delete_group(gdel)
+                    if ok:
+                        st.success(msg)
+                        st.experimental_rerun()
+                    else:
+                        st.error(msg)
+
+            st.markdown("### Membership")
+            all_emails = [u["email"] for u in (_users or [])]
+            all_groups = [g["name"] for g in (_groups or [])]
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                mem_user = st.selectbox("User", options=all_emails, key="admin-mem-user")
+            with mc2:
+                mem_group = st.selectbox("Group", options=all_groups, key="admin-mem-group")
+            with mc3:
+                st.write("")
+                if st.button("Assign", key="btn-assign-ug") and mem_user and mem_group:
+                    ok, msg = auth_acl.assign_user_to_group(mem_user, mem_group)
+                    st.success(msg) if ok else st.error(msg)
+                if st.button("Unassign", key="btn-unassign-ug") and mem_user and mem_group:
+                    ok, msg = auth_acl.unassign_user_from_group(mem_user, mem_group)
+                    st.success(msg) if ok else st.error(msg)
+
+        # Visualization Access
+        with admin_tabs[3]:
+            st.subheader("Visualization Access")
+            vizzes = auth_acl.list_visualizations()
+            viz_keys = [v["key"] for v in vizzes]
+            viz_labels = {v["key"]: v["name"] for v in vizzes}
+
+            st.markdown("#### User-level Overrides")
+            sel_u = st.selectbox("User", options=[u["email"] for u in (_users or [])], key="acl-user")
+            if sel_u:
+                effective = auth_acl.allowed_visualizations_for(sel_u)
+                current_sel = sorted(list(effective))
+                pick = st.multiselect("Allowed Visualizations (effective)", options=viz_keys, default=current_sel,
+                                      format_func=lambda k: viz_labels.get(k, k), key="acl-user-pick")
+                if st.button("Save User Access", key="btn-save-user-acl"):
+                    for k in viz_keys:
+                        auth_acl.allow_viz_for_user(sel_u, k, k in pick)
+                    st.success("User access updated.")
+
+            st.markdown("#### Group-level Defaults")
+            sel_g = st.selectbox("Group", options=[g["name"] for g in (_groups or [])], key="acl-group")
+            if sel_g:
+                active_keys = [v["key"] for v in vizzes if v.get("is_active")]
+                pick_g = st.multiselect("Allowed for Group", options=viz_keys, default=active_keys,
+                                        format_func=lambda k: viz_labels.get(k, k), key="acl-group-pick")
+                if st.button("Save Group Access", key="btn-save-group-acl"):
+                    for k in viz_keys:
+                        auth_acl.allow_viz_for_group(sel_g, k, k in pick_g)
+                    st.success("Group access updated.")
 
 # ---------- Overview ----------
 with tabs[0]:
