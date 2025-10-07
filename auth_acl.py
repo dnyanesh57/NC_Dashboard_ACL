@@ -172,9 +172,13 @@ def get_engine():
         # Ensure driver prefix for SQLAlchemy if user provided 'postgresql://'
         if db_url.startswith("postgresql://") and "+" not in db_url.split(":")[0]:
             db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        # Ensure sslmode and a short connect timeout to avoid long hangs on health checks
         if "sslmode" not in db_url:
             sep = "&" if "?" in db_url else "?"
             db_url = f"{db_url}{sep}sslmode=require"
+        if "connect_timeout=" not in db_url:
+            sep = "&" if "?" in db_url else "?"
+            db_url = f"{db_url}{sep}connect_timeout=5"
         _engine = create_engine(db_url, pool_pre_ping=True)
         _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
     return _engine

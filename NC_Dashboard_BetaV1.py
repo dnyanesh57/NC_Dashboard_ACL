@@ -55,6 +55,12 @@ def _auth_ui() -> Optional[Dict]:
             pwd = st.text_input("Password", type="password", key="auth-pass")
             if st.button("Login", type="primary", key="btn-login"):
                 try:
+                    # Lazy init DB only when needed
+                    try:
+                        auth_acl.init_db(seed_admin=True)
+                    except Exception as e:
+                        st.error(f"Database init failed: {e}")
+                        return None
                     u = auth_acl.authenticate(email, pwd)
                 except Exception as e:
                     st.error(f"Login error: {e}")
@@ -72,6 +78,11 @@ def _auth_ui() -> Optional[Dict]:
         elif mode == "Forgot Password":
             email = st.text_input("Email", key="fp-email")
             if st.button("Send Reset Email", key="btn-fp"):
+                try:
+                    auth_acl.init_db(seed_admin=False)
+                except Exception as e:
+                    st.error(f"Database init failed: {e}")
+                    return None
                 ok, token_or_msg = auth_acl.create_password_reset(email)
                 if ok:
                     st.success("If the account exists, a reset email was sent. Keep this token for Reset Password.")
@@ -82,6 +93,11 @@ def _auth_ui() -> Optional[Dict]:
             token = st.text_input("Reset Token", key="rp-token")
             newp = st.text_input("New Password", type="password", key="rp-new")
             if st.button("Reset Password", key="btn-rp"):
+                try:
+                    auth_acl.init_db(seed_admin=False)
+                except Exception as e:
+                    st.error(f"Database init failed: {e}")
+                    return None
                 ok, msg = auth_acl.reset_password_with_token(token, newp)
                 if ok:
                     st.success("Password reset successful. Please login.")
@@ -90,7 +106,6 @@ def _auth_ui() -> Optional[Dict]:
     return st.session_state.get("auth_user")
 
 
-_init_acl()
 _auth_ui()
 if not st.session_state.get("auth_user"):
     st.info("Please log in to view the dashboard.")
