@@ -12,6 +12,7 @@
 
 from typing import Optional, Any, Tuple, List
 import datetime as dt
+import os, glob
 import re, io
 import numpy as np
 import pandas as pd
@@ -656,11 +657,42 @@ def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
       - Normalize column names and drop duplicate columns
     """
     if file is None:
-        default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
+        # 1) Try to pick latest local file from ./data (by modified time)
         try:
-            df = pd.read_csv(default_path)
+            base_dir = os.path.dirname(__file__)
+            data_dir = os.path.join(base_dir, "data")
+            candidates: list[str] = []
+            for pattern in ("*.csv", "*.xlsx", "*.xls"):
+                candidates.extend(glob.glob(os.path.join(data_dir, pattern)))
+            latest_path: Optional[str] = None
+            if candidates:
+                latest_path = max(candidates, key=lambda p: os.path.getmtime(p))
+            if latest_path:
+                name = os.path.basename(latest_path).lower()
+                if name.endswith((".xlsx", ".xls")):
+                    df = pd.read_excel(latest_path)
+                else:
+                    # Try common encodings
+                    last_err = None
+                    for enc in (None, "utf-8", "utf-8-sig", "latin-1"):
+                        try:
+                            df = pd.read_csv(latest_path, encoding=enc)  # type: ignore
+                            break
+                        except Exception as e:
+                            last_err = e
+                            continue
+                    else:
+                        raise last_err or RuntimeError("Could not read latest CSV")
+                try:
+                    st.caption(f"Loaded latest local data file: {os.path.basename(latest_path)}")
+                except Exception:
+                    pass
+            else:
+                # 2) Fallback: demo CSV from GitHub
+                default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
+                df = pd.read_csv(default_path)
         except Exception:
-            st.error("No file uploaded and demo CSV not available.")
+            st.error("No file uploaded and no local/latest demo file available.")
             st.stop()
     else:
         name = getattr(file, "name", "uploaded.csv").lower()
@@ -1848,7 +1880,19 @@ with tabs[7]:
         area.update_layout(title="Open Backlog (cumulative)")
         show_chart(style_fig(area, theme), key="tl-backlog")
 
+        # Calendar heatmaps — select which to show
+        _cal_opts: list[str] = []
         if df_filtered["_RaisedWeek"].notna().any() and df_filtered["_RaisedDOW"].notna().any():
+            _cal_opts.append("Raised")
+        if "_ClosedOnDT" in df_filtered.columns and df_filtered["_ClosedOnDT"].notna().any():
+            _cal_opts.append("Closed")
+        if "_RespondedOnDT" in df_filtered.columns and df_filtered["_RespondedOnDT"].notna().any():
+            _cal_opts.append("Responded")
+        if not _cal_opts:
+            _cal_opts = ["Raised"]
+        cal_choice = st.radio("Calendar Heatmap", _cal_opts, index=0, horizontal=True, key="tl-cal-which")
+
+        if cal_choice == "Raised" and df_filtered["_RaisedWeek"].notna().any() and df_filtered["_RaisedDOW"].notna().any():
             cal = df_filtered.groupby(["_RaisedWeek","_RaisedDOW"]).size().reset_index(name="Count")
             days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
             cal["_RaisedDOW"] = pd.Categorical(cal["_RaisedDOW"], categories=days, ordered=True)
@@ -1857,6 +1901,34 @@ with tabs[7]:
                             labels=dict(x="Week", y="Day", color="Raised"))
             fig.update_layout(title="Calendar Heatmap — Raised (Week × DOW)")
             show_chart(style_fig(fig, theme), key="tl-cal-heatmap")
+
+        # Closed calendar heatmap (Week x DOW)
+        if cal_choice == "Closed" and "_ClosedOnDT" in df_filtered.columns and df_filtered["_ClosedOnDT"].notna().any():
+            tmp = df_filtered[df_filtered["_ClosedOnDT"].notna()].copy()
+            tmp["_ClosedWeek"] = tmp["_ClosedOnDT"].dt.to_period("W").astype(str)
+            tmp["_ClosedDOW"] = tmp["_ClosedOnDT"].dt.day_name()
+            cal_c = tmp.groupby(["_ClosedWeek","_ClosedDOW"]).size().reset_index(name="Count")
+            days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            cal_c["_ClosedDOW"] = pd.Categorical(cal_c["_ClosedDOW"], categories=days, ordered=True)
+            pv_c = cal_c.pivot(index="_ClosedDOW", columns="_ClosedWeek", values="Count").fillna(0)
+            fig_c = px.imshow(pv_c.values, x=pv_c.columns, y=pv_c.index, aspect="auto",
+                              labels=dict(x="Week", y="Day", color="Closed"))
+            fig_c.update_layout(title="Calendar Heatmap - Closed (Week x DOW)")
+            show_chart(style_fig(fig_c, theme), key="tl-cal-heatmap-closed")
+
+        # Responded calendar heatmap (Week x DOW)
+        if cal_choice == "Responded" and "_RespondedOnDT" in df_filtered.columns and df_filtered["_RespondedOnDT"].notna().any():
+            tmp = df_filtered[df_filtered["_RespondedOnDT"].notna()].copy()
+            tmp["_RespondedWeek"] = tmp["_RespondedOnDT"].dt.to_period("W").astype(str)
+            tmp["_RespondedDOW"] = tmp["_RespondedOnDT"].dt.day_name()
+            cal_r = tmp.groupby(["_RespondedWeek","_RespondedDOW"]).size().reset_index(name="Count")
+            days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            cal_r["_RespondedDOW"] = pd.Categorical(cal_r["_RespondedDOW"], categories=days, ordered=True)
+            pv_r = cal_r.pivot(index="_RespondedDOW", columns="_RespondedWeek", values="Count").fillna(0)
+            fig_r = px.imshow(pv_r.values, x=pv_r.columns, y=pv_r.index, aspect="auto",
+                              labels=dict(x="Week", y="Day", color="Responded"))
+            fig_r.update_layout(title="Calendar Heatmap - Responded (Week x DOW)")
+            show_chart(style_fig(fig_r, theme), key="tl-cal-heatmap-responded")
     else:
         st.info("No Raised On timestamps available.")
 
