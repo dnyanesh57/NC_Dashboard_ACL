@@ -5,6 +5,12 @@ import secrets
 import smtplib
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+try:
+    import requests  # type: ignore
+    from requests.auth import HTTPBasicAuth  # type: ignore
+except Exception:  # pragma: no cover
+    requests = None  # type: ignore
+    HTTPBasicAuth = None  # type: ignore
 from typing import List, Optional, Tuple, Dict, Set
 
 from sqlalchemy import (
@@ -645,8 +651,6 @@ def _smtp_config() -> Optional[Dict]:
 
 def send_reset_email(to_email: str, token: str) -> None:
     cfg = _smtp_config()
-    if not cfg:
-        raise RuntimeError("SMTP not configured in secrets; cannot send email.")
 
     subject = "Password Reset Instructions"
     # Provide app URL hint if present
@@ -669,6 +673,48 @@ def send_reset_email(to_email: str, token: str) -> None:
     ]
     if app_url:
         body.insert(2, f"Open: {app_url}")
+
+    # Prefer Mailjet if configured; fallback to SMTP
+    mj_key = None
+    mj_secret = None
+    mj_from_email = None
+    mj_from_name = None
+    if st is not None:
+        try:
+            mj_key = st.secrets.get("MAILJET_API_KEY")
+            mj_secret = st.secrets.get("MAILJET_API_SECRET")
+            mj_from_email = st.secrets.get("MAILJET_FROM_EMAIL")
+            mj_from_name = st.secrets.get("MAILJET_FROM_NAME")
+        except Exception:
+            pass
+    # Fallbacks from env
+    mj_key = mj_key or os.environ.get("MAILJET_API_KEY")
+    mj_secret = mj_secret or os.environ.get("MAILJET_API_SECRET")
+    mj_from_email = mj_from_email or os.environ.get("MAILJET_FROM_EMAIL")
+    mj_from_name = mj_from_name or os.environ.get("MAILJET_FROM_NAME")
+
+    if mj_key and mj_secret and mj_from_email:
+        if requests is None or HTTPBasicAuth is None:
+            raise RuntimeError("requests not available for Mailjet sending")
+        from_name = mj_from_name or (mj_from_email.split("@")[0])
+        url = "https://api.mailjet.com/v3.1/send"
+        payload = {
+            "Messages": [
+                {
+                    "From": {"Email": mj_from_email, "Name": from_name},
+                    "To": [{"Email": to_email, "Name": to_email}],
+                    "Subject": subject,
+                    "TextPart": "\n".join(body),
+                }
+            ]
+        }
+        resp = requests.post(url, json=payload, auth=HTTPBasicAuth(mj_key, mj_secret), timeout=15)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Mailjet send failed: {resp.status_code} {resp.text}")
+        return
+
+    if not cfg:
+        raise RuntimeError("No Mail transport configured (Mailjet or SMTP)")
 
     msg = EmailMessage()
     msg["From"] = str(cfg["SMTP_FROM"])
