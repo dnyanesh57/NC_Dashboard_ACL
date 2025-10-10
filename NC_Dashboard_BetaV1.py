@@ -955,10 +955,27 @@ with tabs[11]:
             if st.button("Create User", key="btn-admin-create-user"):
                 ok, msg = auth_acl.create_user(nu_email, nu_name, nu_pass, nu_role)
                 if ok:
+                    # Store last created user credentials (admin-only session) for follow-up email
+                    st.session_state["admin_last_created_user"] = {
+                        "email": nu_email,
+                        "name": nu_name,
+                        "password": nu_pass,
+                    }
                     st.success(msg)
                     st.experimental_rerun()
                 else:
                     st.error(msg)
+
+            # Offer to send credentials for the last created user
+            _lc = st.session_state.get("admin_last_created_user")
+            if _lc and _lc.get("email") and _lc.get("password"):
+                if st.button("Send Credentials To Created User", key="btn-send-new-cred"):
+                    try:
+                        auth_acl.send_credentials_email(_lc["email"], _lc.get("name") or _lc["email"], _lc["password"])
+                        st.success(f"Credentials email sent to {_lc['email']}")
+                        del st.session_state["admin_last_created_user"]
+                    except Exception as e:
+                        st.error(f"Failed to send credentials: {e}")
 
             st.markdown("### Manage User")
             emails = [u["email"] for u in _users] if _users else []
@@ -987,6 +1004,37 @@ with tabs[11]:
                         else:
                             st.error(token)
                 st.divider()
+                # Send credentials to selected user (set new password and send)
+                st.markdown("#### Send Credentials Email")
+                cred_cols = st.columns([2,1])
+                with cred_cols[0]:
+                    temp_pass = st.text_input("Temp Password to Send", type="password", key="admin-cred-pass")
+                with cred_cols[1]:
+                    gen = st.button("Generate", key="btn-gen-cred-pass")
+                if gen:
+                    import secrets as _secrets
+                    st.session_state["admin-cred-pass"] = _secrets.token_urlsafe(8)
+                    st.experimental_rerun()
+                if st.button("Set Password & Send Credentials", key="btn-send-cred-now"):
+                    tp = st.session_state.get("admin-cred-pass", "")
+                    if not tp:
+                        st.warning("Enter or generate a temporary password first.")
+                    else:
+                        ok, msg = auth_acl.set_password(sel_user, tp)
+                        if ok:
+                            # find name for selected user
+                            _name = None
+                            try:
+                                _name = next((u.get("name") for u in (_users or []) if u.get("email") == sel_user), None)
+                            except Exception:
+                                _name = None
+                            try:
+                                auth_acl.send_credentials_email(sel_user, _name or sel_user, tp)
+                                st.success(f"Credentials sent to {sel_user}")
+                            except Exception as e:
+                                st.error(f"Failed to send credentials: {e}")
+                        else:
+                            st.error(msg)
                 if st.button("Delete User", key="btn-del-user"):
                     ok, msg = auth_acl.delete_user(sel_user)
                     if ok:

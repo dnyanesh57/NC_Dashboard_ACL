@@ -734,8 +734,100 @@ def send_reset_email(to_email: str, token: str) -> None:
             if user and password:
                 smtp.login(user, password)
             smtp.send_message(msg)
+
+
+def send_credentials_email(to_email: str, name: str, password: str) -> None:
+    """Send initial credentials (email + password) and app URL to a user.
+
+    Uses Mailjet if configured, falling back to SMTP (same transport logic as reset email).
+    """
+    # Try to get app URL from secrets (optional)
+    app_url = None
+    if st is not None:
+        try:
+            app_url = st.secrets.get("APP_URL")
+        except Exception:
+            pass
+
+    subject = "Your Account Credentials"
+    body = [
+        f"Hello {name},",
+        "",
+        "Your account has been created.",
+    ]
+    if app_url:
+        body.append(f"App URL: {app_url}")
+    body.extend([
+        f"Email: {to_email}",
+        f"Temporary Password: {password}",
+        "",
+        "For security, please sign in and change your password.",
+    ])
+
+    # Prefer Mailjet if configured; fallback to SMTP
+    mj_key = None
+    mj_secret = None
+    mj_from_email = None
+    mj_from_name = None
+    if st is not None:
+        try:
+            mj_key = st.secrets.get("MAILJET_API_KEY")
+            mj_secret = st.secrets.get("MAILJET_API_SECRET")
+            mj_from_email = st.secrets.get("MAILJET_FROM_EMAIL")
+            mj_from_name = st.secrets.get("MAILJET_FROM_NAME")
+        except Exception:
+            pass
+    # Fallbacks from env
+    mj_key = mj_key or os.environ.get("MAILJET_API_KEY")
+    mj_secret = mj_secret or os.environ.get("MAILJET_API_SECRET")
+    mj_from_email = mj_from_email or os.environ.get("MAILJET_FROM_EMAIL")
+    mj_from_name = mj_from_name or os.environ.get("MAILJET_FROM_NAME")
+
+    if mj_key and mj_secret and mj_from_email:
+        if requests is None or HTTPBasicAuth is None:
+            raise RuntimeError("requests not available for Mailjet sending")
+        from_name = mj_from_name or (mj_from_email.split("@")[0])
+        url = "https://api.mailjet.com/v3.1/send"
+        payload = {
+            "Messages": [
+                {
+                    "From": {"Email": mj_from_email, "Name": from_name},
+                    "To": [{"Email": to_email, "Name": name or to_email}],
+                    "Subject": subject,
+                    "TextPart": "\n".join(body),
+                }
+            ]
+        }
+        resp = requests.post(url, json=payload, auth=HTTPBasicAuth(mj_key, mj_secret), timeout=15)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Mailjet send failed: {resp.status_code} {resp.text}")
+        return
+
+    # SMTP fallback using existing config
+    cfg = _smtp_config()
+    if not cfg:
+        raise RuntimeError("No Mail transport configured (Mailjet or SMTP)")
+
+    msg = EmailMessage()
+    msg["From"] = str(cfg["SMTP_FROM"])
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content("\n".join(body))
+
+    host = str(cfg["SMTP_HOST"]) 
+    port = int(cfg.get("SMTP_PORT", 587))
+    user = str(cfg.get("SMTP_USER", ""))
+    password_smtp = str(cfg.get("SMTP_PASSWORD", ""))
+    use_tls = bool(cfg.get("SMTP_TLS", True))
+
+    if use_tls:
+        with smtplib.SMTP(host, port) as smtp:
+            smtp.starttls()
+            if user and password_smtp:
+                smtp.login(user, password_smtp)
+            smtp.send_message(msg)
     else:
         with smtplib.SMTP(host, port) as smtp:
-            if user and password:
-                smtp.login(user, password)
+            if user and password_smtp:
+                smtp.login(user, password_smtp)
             smtp.send_message(msg)

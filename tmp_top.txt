@@ -1,0 +1,1100 @@
+# digiqc_dashboard_NC_V2.7_SJCPL.py
+# Digital NC Register — Streamlit (SJCPL Brand)
+# - Keeps V2.6 working framework intact
+# - Fixes fullscreen legend/title overlap (legend docked below + safe margins)
+# - Adds donuts, sunburst, heatmaps, Pareto, backlog area, calendar heatmap, stacked mixes, bubble chart
+# - NEW: Activity-Wise also shows "Normal (Non-R2C)" and "All NCs" sections for recurring-issue tracking
+# - Brand-locked palette: Blue(#00AEDA), Black(#000000), Grey(#939598), White(#FFFFFF)
+# --------------------------------------------------------------
+# Run:
+#   pip install -U streamlit plotly pandas numpy openpyxl
+#   streamlit run digiqc_dashboard_NC_V2.7_SJCPL.py
+
+from typing import Optional, Any, Tuple, List
+import datetime as dt
+import os, glob
+import re, io
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from typing import Dict
+
+# ---------- Auth / ACL imports ----------
+try:
+    import auth_acl  # local module for authentication/authorization
+except Exception:
+    auth_acl = None  # type: ignore
+
+# ---------- Streamlit compatibility helpers (early) ----------
+def _safe_rerun():
+    try:
+        fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+        if callable(fn):
+            fn()
+        else:
+            st.session_state["_force_rerun_nonce"] = st.session_state.get("_force_rerun_nonce", 0) + 1
+    except Exception:
+        pass
+
+# ---------- Access Control (login gate) ----------
+def _init_acl():
+    if auth_acl is None:
+        st.error("ACL module not available. Ensure 'auth_acl.py' exists.")
+        st.stop()
+    try:
+        auth_acl.init_db(seed_admin=True)
+    except Exception as e:
+        st.error(f"Database init failed: {e}")
+        st.stop()
+
+
+def _auth_ui() -> Optional[Dict]:
+    user = st.session_state.get("auth_user")
+    with st.sidebar:
+        st.markdown("### Account")
+        if user:
+            st.success(f"Logged in as {user.get('name')} ({user.get('role')})")
+            if st.button("Logout", type="secondary", key="btn-logout"):
+                st.session_state["auth_user"] = None
+                st.session_state.pop("allowed_viz", None)
+                _safe_rerun()
+            return user
+        mode = st.radio("Access", ["Login", "Forgot Password", "Reset Password"], horizontal=True, key="auth-mode")
+        if mode == "Login":
+            email = st.text_input("Email", key="auth-email")
+            pwd = st.text_input("Password", type="password", key="auth-pass")
+            if st.button("Login", type="primary", key="btn-login"):
+                try:
+                    # Lazy init DB only when needed
+                    try:
+                        auth_acl.init_db(seed_admin=True)
+                    except Exception as e:
+                        st.error(f"Database init failed: {e}")
+                        return None
+                    u = auth_acl.authenticate(email, pwd)
+                except Exception as e:
+                    st.error(f"Login error: {e}")
+                    u = None
+                if u:
+                    st.session_state["auth_user"] = u
+                    try:
+                        allowed = auth_acl.allowed_visualizations_for(u["email"]) or set()
+                    except Exception:
+                        allowed = set()
+                    st.session_state["allowed_viz"] = allowed
+                    _safe_rerun()
+                else:
+                    st.error("Invalid credentials or inactive account.")
+        elif mode == "Forgot Password":
+            email = st.text_input("Email", key="fp-email")
+            if st.button("Send Reset Email", key="btn-fp"):
+                try:
+                    auth_acl.init_db(seed_admin=False)
+                except Exception as e:
+                    st.error(f"Database init failed: {e}")
+                    return None
+                ok, token_or_msg = auth_acl.create_password_reset(email)
+                if ok:
+                    st.success("If the account exists, a reset email was sent. Keep this token for Reset Password.")
+                    st.code(token_or_msg)
+                else:
+                    st.error(token_or_msg)
+        else:  # Reset Password
+            token = st.text_input("Reset Token", key="rp-token")
+            newp = st.text_input("New Password", type="password", key="rp-new")
+            if st.button("Reset Password", key="btn-rp"):
+                try:
+                    auth_acl.init_db(seed_admin=False)
+                except Exception as e:
+                    st.error(f"Database init failed: {e}")
+                    return None
+                ok, msg = auth_acl.reset_password_with_token(token, newp)
+                if ok:
+                    st.success("Password reset successful. Please login.")
+                else:
+                    st.error(msg)
+    return st.session_state.get("auth_user")
+
+
+_auth_ui()
+if not st.session_state.get("auth_user"):
+    st.info("Please log in to view the dashboard.")
+    st.stop()
+
+# ---------- Safe Styler import (older pandas compatible) ----------
+try:
+    from pandas.io.formats.style import Styler  # type: ignore
+except Exception:
+    Styler = Any  # type: ignore
+
+# ---------- Page ----------
+st.set_page_config(page_title="Digital NC Register — SJCPL", page_icon="🧭", layout="wide")
+
+# ---------- SJCPL Brand (locked) ----------
+WHITE = "#FFFFFF"
+BLACK = "#000000"
+GREY  = "#939598"
+BLUE  = "#00AEDA"
+
+# Helpers to create brand-based gradient colours (no extra hues)
+def _hex_to_rgb(h: str) -> Tuple[int,int,int]:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0,2,4))  # type: ignore
+
+def _rgb_to_hex(r: Tuple[int,int,int]) -> str:
+    return "#{:02X}{:02X}{:02X}".format(*r)
+
+def blend(c1: str, c2: str, t: float) -> str:
+    r1,g1,b1 = _hex_to_rgb(c1); r2,g2,b2 = _hex_to_rgb(c2)
+    r = int(round(r1 + (r2 - r1)*t))
+    g = int(round(g1 + (g2 - g1)*t))
+    b = int(round(b1 + (b2 - b1)*t))
+    return _rgb_to_hex((max(0,min(255,r)), max(0,min(255,g)), max(0,min(255,b))))
+
+# Build a long, non-repeating sequence using only brand endpoints via gradients
+def distinct_brand_colors(n: int) -> List[str]:
+    """Return n visually distinct colours using only BLUE↔BLACK↔GREY↔WHITE gradients.
+       Ensures the 4 base swatches appear at most once each."""
+    anchors = [BLUE, BLACK, GREY, WHITE]
+    seq: List[str] = []
+    order = [BLUE, BLACK, GREY, WHITE]
+    for c in order:
+        if len(seq) < n:
+            seq.append(c)
+    if len(seq) >= n:
+        return seq[:n]
+    legs = [(BLUE, BLACK), (BLACK, GREY), (GREY, WHITE), (WHITE, BLUE)]
+    needed = n - len(seq)
+    steps_per_leg = max(2, int(np.ceil(needed / len(legs))) + 1)
+    extras: List[str] = []
+    for a,b in legs:
+        for i in range(1, steps_per_leg):
+            t = i/steps_per_leg
+            extras.append(blend(a,b,t))
+    seen = set(x.upper() for x in seq)
+    out = [c for c in extras if c.upper() not in seen]
+    seq.extend(out[:needed])
+    return seq[:n]
+
+# Status colours mapped to brand-only choices.
+SJCPL_STATUS = {
+    "Closed":     BLACK,      # Terminal / final
+    "Resolved":   BLACK,      # Effective resolution (same visual as Closed)
+    "Approved":   GREY,       # Neutral
+    "In Process": BLUE,       # Active
+    "In-Process": BLUE,       # Active
+    "Open":       BLUE,       # Active
+    "Redo":       GREY,       # Neutral/needs action
+    "Rejected":   GREY,       # Neutral/negative mapped to grey
+    "Responded":  BLUE,       # Progress event
+}
+
+SJCPL_METRICS = {
+    "Total":    BLUE,
+    "Resolved": BLACK,
+    "R2C":      GREY,
+    "Open":     BLUE,
+    "RespOnly": GREY,
+}
+
+# Continuous gradient using only brand colours
+BRAND_GRADIENT = [
+    [0.0, WHITE],
+    [0.5, BLUE],
+    [1.0, BLACK],
+]
+
+THEMES = {
+    "SJCPL": {
+        "template": "plotly_white",
+        "status_map": SJCPL_STATUS,
+        "metric_map": SJCPL_METRICS,
+        "gradient": BRAND_GRADIENT
+    }
+}
+theme = "SJCPL"
+
+# ---------- Plotly styling (fullscreen-safe legend) ----------
+def style_fig(fig, theme_name: str):
+    fig.update_layout(
+        template=THEMES[theme_name]["template"],
+        font=dict(family="Roboto, Arial, sans-serif", size=12, color=BLACK),
+
+        # Legend docked below the plot area — avoids title/subtitle overlap in fullscreen
+        legend=dict(
+            title='',
+            orientation="h",
+            yanchor="top",
+            y=-0.28,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(255,255,255,0.95)",
+            bordercolor="rgba(0,0,0,0.08)",
+            borderwidth=1
+        ),
+
+        hoverlabel=dict(bgcolor="rgba(255,255,255,0.95)", 
+                        font=dict(family="Roboto, Arial, sans-serif", color=BLACK)),
+        bargap=0.22,
+
+        # Extra headroom/footroom for fullscreen
+        margin=dict(l=10, r=10, t=90, b=120),
+        autosize=True
+    )
+
+    # Axes & grids
+    fig.update_xaxes(showgrid=True, gridcolor="#ECEFF1", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#ECEFF1", zeroline=False)
+
+    # ✅ Only apply marker line to trace types that actually support it
+    _safe_types = ("bar", "histogram", "scatter", "pie", "box", "violin", "treemap", "sunburst")
+    for t in _safe_types:
+        fig.update_traces(
+            selector=dict(type=t),
+            marker=dict(line=dict(width=0.5, color="rgba(0,0,0,0.20)"))
+        )
+
+    return fig
+
+
+def show_chart(fig, key: str):
+    try:
+        st.plotly_chart(fig, use_container_width=True, key=key)
+    except Exception as e:
+        st.warning(f"Chart failed ({key}): {e}")
+
+# ---------- Explicit date/time parsing ----------
+_date_ddmmyyyy_slash = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{2,4})\s*$")
+_date_ddmmyyyy_dash  = re.compile(r"^\s*(\d{1,2})-(\d{1,2})-(\d{2,4})\s*$")
+_date_yyyymmdd_dash  = re.compile(r"^\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*$")
+_time_hhmm_ampm      = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?m\.?)\s*$", re.I)
+_time_hhmm_24        = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$")
+
+def _norm_year(y: int) -> int:
+    if y < 100: return 2000 + y if y < 70 else 1900 + y
+    return y
+
+def _normalize_date_str(s: str) -> str:
+    if not s or s.lower() in ("nan", "nat", "none"): return ""
+    s = s.strip()
+    m = _date_ddmmyyyy_slash.match(s) or _date_ddmmyyyy_dash.match(s)
+    if m:
+        d, mth, y = int(m.group(1)), int(m.group(2)), _norm_year(int(m.group(3)))
+        try: return f"{y:04d}-{mth:02d}-{d:02d}"
+        except Exception: return ""
+    m = _date_yyyymmdd_dash.match(s)
+    if m:
+        y, mth, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try: return f"{y:04d}-{mth:02d}-{d:02d}"
+        except Exception: return ""
+    return ""
+
+def _normalize_time_str(s: str) -> str:
+    if not s or s.lower() in ("nan", "nat", "none"): return ""
+    s0 = s.strip().lower().replace(".", "")
+    m = _time_hhmm_ampm.match(s0)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2)); ss = int(m.group(3)) if m.group(3) else 0
+        ampm = m.group(4).lower()
+        if "pm" in ampm and hh < 12: hh += 12
+        if "am" in ampm and hh == 12: hh = 0
+        if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59): return ""
+        return f"{hh:02d}:{mm:02d}:{ss:02d}"
+    m = _time_hhmm_24.match(s0)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2)); ss = int(m.group(3)) if m.group(3) else 0
+        if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59): return ""
+        return f"{hh:02d}:{mm:02d}:{ss:02d}"
+    return ""
+
+def _normalize_series_date(s: pd.Series) -> pd.Series:
+    return s.astype(str).map(_normalize_date_str)
+
+def _normalize_series_time(s: pd.Series) -> pd.Series:
+    return s.astype(str).map(_normalize_time_str)
+
+def combine_datetime(date_series: pd.Series, time_series: pd.Series) -> pd.Series:
+    d = _normalize_series_date(date_series)
+    t = _normalize_series_time(time_series)
+    has_date = d != ""
+    t = np.where((t == "") & has_date, "00:00:00", t)
+    full = np.where(has_date, d + " " + t, "")
+    out = pd.to_datetime(full, format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    return out  # keep naive
+
+# ---------- Business rules ----------
+def _safe_get(df: pd.DataFrame, col: str) -> pd.Series:
+    return df[col] if col in df.columns else pd.Series([np.nan] * len(df), index=df.index, name=col)
+
+def extract_location_variable(raw: pd.Series) -> pd.Series:
+    def _extract(val):
+        if pd.isna(val): return val
+        s = str(val)
+        return s.rsplit("/", 1)[-1].strip() if "/" in s else s.strip()
+    return raw.apply(_extract)
+
+def humanize_td(td: pd.Series) -> pd.Series:
+    def _fmt(x):
+        if pd.isna(x): return ""
+        total_seconds = int(x.total_seconds())
+        if total_seconds < 0: return ""
+        days, rem = divmod(total_seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        parts = []
+        if days: parts.append(f"{days}d")
+        if hours: parts.append(f"{hours}h")
+        if minutes: parts.append(f"{minutes}m")
+        return " ".join(parts) if parts else "0m"
+    return td.apply(_fmt)
+
+def style_status_rows(df: pd.DataFrame, theme_name: str) -> Styler:
+    status_map = THEMES[theme_name]["status_map"]
+    def highlight(row):
+        status = str(row.get("Current Status", "")).strip()
+        bg = status_map.get(status, WHITE)
+        txt = WHITE if bg in (BLACK, GREY) else BLACK
+        return [f"background-color: {bg}; color: {txt};"] * len(row)
+    try:
+        return df.style.apply(highlight, axis=1)
+    except Exception:
+        return df  # fallback
+
+def ensure_last_status_change(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee _LastStatusChangeDT/_LastStatusEvent exist, computing from available timestamps."""
+    def ensure_series(df, out_col, dcol, tcol):
+        if out_col not in df.columns:
+            if dcol in df.columns or tcol in df.columns:
+                df[out_col] = combine_datetime(_safe_get(df, dcol), _safe_get(df, tcol))
+            else:
+                df[out_col] = pd.NaT
+        return df
+
+    # Make sure the base datetime columns exist
+    df = ensure_series(df, "_RaisedOnDT",    "Raised On Date",   "Raised On Time")
+    df = ensure_series(df, "_RespondedOnDT", "Responded On Date","Responded On Time")
+    df = ensure_series(df, "_RejectedOnDT",  "Rejected On Date", "Rejected On Time")
+    df = ensure_series(df, "_ClosedOnDT",    "Closed On Date",   "Closed On Time")
+
+    # Effective resolution (closed else valid responded>raised)
+    if "_EffectiveResolutionDT" not in df.columns:
+        eff = df["_ClosedOnDT"].copy()
+        mask_eff = eff.isna() & df["_RespondedOnDT"].notna() & df["_RaisedOnDT"].notna() & (df["_RespondedOnDT"] > df["_RaisedOnDT"])
+        eff.loc[mask_eff] = df.loc[mask_eff, "_RespondedOnDT"]
+        df["_EffectiveResolutionDT"] = eff
+
+    # Compute last status change + event
+    ev_cols = ["_RespondedOnDT","_RejectedOnDT","_ClosedOnDT","_EffectiveResolutionDT"]
+    existing = [c for c in ev_cols if c in df.columns]
+    if existing:
+        sentinel = pd.Timestamp("1900-01-01 00:00:00")
+        evdf = df[existing].copy()
+        evdf_f = evdf.fillna(sentinel)
+        last_ts  = evdf_f.max(axis=1)
+        none_mask = evdf.notna().sum(axis=1) == 0
+        last_ts  = last_ts.mask(none_mask, pd.NaT)
+        last_col = evdf_f.idxmax(axis=1)
+        rev = {
+            "_RespondedOnDT":"Responded",
+            "_RejectedOnDT":"Rejected",
+            "_ClosedOnDT":"Closed",
+            "_EffectiveResolutionDT":"Effective",
+        }
+        df["_LastStatusChangeDT"] = last_ts
+        df["_LastStatusEvent"]    = last_col.map(rev).where(~none_mask, None)
+    else:
+        df["_LastStatusChangeDT"] = pd.NaT
+        df["_LastStatusEvent"]    = None
+    return df
+
+# ---------- Derived columns (effective closure + flags + last status change) ----------
+def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Ensure future/rolling-out fields exist
+    for col in [
+        "Root Cause Analysis","Correction","Corrective Action",
+        "Labour Cost","Material Cost","Machinery Cost","Other Cost","Total Cost"
+    ]:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # Location Variable fix
+    df["Location Variable (Fixed)"] = extract_location_variable(_safe_get(df, "Location Variable")) if "Location Variable" in df.columns else np.nan
+
+    # Datetimes
+    df["_RaisedOnDT"]     = combine_datetime(_safe_get(df, "Raised On Date"), _safe_get(df, "Raised On Time"))
+    df["_DeadlineDT"]     = combine_datetime(_safe_get(df, "Deadline Date"), _safe_get(df, "Deadline Time"))
+    df["_RespondedOnDT"]  = combine_datetime(_safe_get(df, "Responded On Date"), _safe_get(df, "Responded On Time"))
+    df["_RejectedOnDT"]   = combine_datetime(_safe_get(df, "Rejected On Date"), _safe_get(df, "Rejected On Time"))
+    df["_ClosedOnDT"]     = combine_datetime(_safe_get(df, "Closed On Date"), _safe_get(df, "Closed On Time"))
+
+    # Effective resolution (vectorized): closed else responded>raised
+    eff = df["_ClosedOnDT"].copy()
+    mask_eff = eff.isna() & df["_RespondedOnDT"].notna() & df["_RaisedOnDT"].notna() & (df["_RespondedOnDT"] > df["_RaisedOnDT"])
+    eff.loc[mask_eff] = df.loc[mask_eff, "_RespondedOnDT"]
+    df["_EffectiveResolutionDT"] = eff
+
+    # Timings
+    df["Computed Closure Time (Hrs)"] = (df["_EffectiveResolutionDT"] - df["_RaisedOnDT"]).dt.total_seconds() / 3600.0
+    df["Responding Time (Hrs)"]       = (df["_RespondedOnDT"] - df["_RaisedOnDT"]).dt.total_seconds() / 3600.0
+
+    # Responded but NOT Closed
+    df["_RespondedNotClosed_Flag"] = (
+        df["_ClosedOnDT"].isna() &
+        df["_RespondedOnDT"].notna() & df["_RaisedOnDT"].notna() &
+        (df["_RespondedOnDT"] > df["_RaisedOnDT"])
+    ).astype(int)
+
+    # Close-after-response
+    mask_car = df["_EffectiveResolutionDT"].notna() & df["_RespondedOnDT"].notna() & (df["_EffectiveResolutionDT"] >= df["_RespondedOnDT"])
+    df["Close After Response (Hrs)"] = np.where(
+        mask_car,
+        (df["_EffectiveResolutionDT"] - df["_RespondedOnDT"]).dt.total_seconds() / 3600.0,
+        np.nan
+    )
+
+    # SLA
+    df["SLA Met"] = np.where(
+        df["_DeadlineDT"].notna() & df["_EffectiveResolutionDT"].notna(),
+        df["_EffectiveResolutionDT"] <= df["_DeadlineDT"],
+        np.nan
+    )
+
+    # Total cost fallback
+    parts = ["Labour Cost","Material Cost","Machinery Cost","Other Cost"]
+    if "Total Cost" in df.columns:
+        part_sum = df[[p for p in parts if p in df.columns]].apply(pd.to_numeric, errors="coerce").sum(axis=1, min_count=1)
+        df["Total Cost"] = pd.to_numeric(df["Total Cost"], errors="coerce").fillna(part_sum)
+
+    # -------- Rejected → Closed flags (inferred + strict) --------
+    def _nz(series_name: str) -> pd.Series:
+        s = _safe_get(df, series_name)
+        return s.where(s.notna(), "").astype(str).str.strip()
+
+    has_reject_evidence = (
+        df["_RejectedOnDT"].notna() |
+        _nz("Rejected By").ne("") | _nz("Rejected Comment").ne("") |
+        _nz("Rejected On Date").ne("") | _nz("Rejected On Time").ne("")
+    )
+    cur_status = _nz("Current Status").str.lower()
+    closedish  = cur_status.str.contains(r"\b(closed|approved|resolved|complete)\b", regex=True)
+    currently_rejected = cur_status.eq("rejected")
+    has_close_evidence = (
+        df["_ClosedOnDT"].notna() | closedish |
+        _nz("Closed By").ne("") | _nz("Closed Comment").ne("") |
+        _nz("Closed On Date").ne("") | _nz("Closed On Time").ne("")
+    )
+    # Exclude records whose current status is 'Rejected' from R2C counting
+    df["_R2C_Flag"] = (has_reject_evidence & has_close_evidence & (~currently_rejected)).astype(int)
+
+    both_dt = df["_RejectedOnDT"].notna() & df["_ClosedOnDT"].notna() & (~currently_rejected)
+    df["_R2C_Strict_Flag"] = both_dt.astype(int)
+    dur_hours = np.where(both_dt, (df["_ClosedOnDT"] - df["_RejectedOnDT"]).dt.total_seconds() / 3600.0, np.nan)
+    df["R2C Hours (>=0)"] = np.where(np.isfinite(dur_hours), np.maximum(dur_hours, 0.0), np.nan)
+
+    # -------- Last Status Change (vectorized) --------
+    event_cols = {
+        "Responded": "_RespondedOnDT",
+        "Rejected":  "_RejectedOnDT",
+        "Closed":    "_ClosedOnDT",
+        "Effective": "_EffectiveResolutionDT",
+    }
+    available = [c for c in event_cols.values() if c in df.columns]
+    if available:
+        sentinel = pd.Timestamp("1900-01-01 00:00:00")
+        evdf = df[available].copy()
+        evdf_f = evdf.fillna(sentinel)
+        last_ts = evdf_f.max(axis=1)
+        none_mask = evdf.notna().sum(axis=1) == 0
+        last_ts = last_ts.mask(none_mask, pd.NaT)
+        last_col = evdf_f.idxmax(axis=1)
+        last_col = last_col.mask(none_mask, None)
+        rev = {v: k for k, v in event_cols.items()}
+        df["_LastStatusChangeDT"] = last_ts
+        df["_LastStatusEvent"] = last_col.map(rev).where(~none_mask, None)
+    else:
+        df["_LastStatusChangeDT"] = pd.NaT
+        df["_LastStatusEvent"] = None
+
+    # -------- Calendar splits for extra timelines --------
+    if df["_RaisedOnDT"].notna().any():
+        df["_RaisedDate"] = df["_RaisedOnDT"].dt.date
+        df["_RaisedWeek"] = df["_RaisedOnDT"].dt.to_period("W").astype(str)
+        df["_RaisedDOW"]  = df["_RaisedOnDT"].dt.day_name()
+        df["_RaisedHour"] = df["_RaisedOnDT"].dt.hour
+    else:
+        df["_RaisedDate"] = np.nan
+        df["_RaisedWeek"] = np.nan
+        df["_RaisedDOW"]  = np.nan
+        df["_RaisedHour"] = np.nan
+
+    return df
+
+def _to_label(x) -> str:
+    if pd.isna(x): return "—"
+    if isinstance(x, (list, tuple, set)):
+        return ", ".join("" if pd.isna(y) else str(y).strip() for y in x)
+    s = str(x).strip()
+    return s if s else "—"
+
+def bar_top_counts(df: pd.DataFrame, col: str, topn: int = 10, template="plotly_white", theme_name: str="SJCPL"):
+    if col not in df.columns:
+        return px.bar(pd.DataFrame({col: [], "count": []}), x="count", y=col, template=template)
+    labels = df[col].apply(_to_label)
+    vc = labels.value_counts(dropna=False).head(topn)
+    counts = pd.DataFrame({col: vc.index.astype(str).tolist(), "count": vc.values})
+    fig = px.bar(
+        counts.sort_values("count", ascending=True),
+        x="count", y=col, orientation="h",
+        color=col, color_discrete_sequence=distinct_brand_colors(len(counts)),
+        template=template, text_auto=True
+    )
+    fig.update_layout(yaxis=dict(autorange="reversed"))
+    return style_fig(fig, theme_name)
+
+def _clean_hours_for_hist(s: pd.Series) -> pd.Series:
+    x = pd.to_numeric(s, errors="coerce")
+    x = x[np.isfinite(x)]
+    x = x[x >= 0]
+    if len(x) > 0:
+        cap = np.nanpercentile(x, 99)
+        x = x[x <= cap]
+    return x
+
+def metrics_summary(df: pd.DataFrame, theme_name: str):
+    total_issues = len(df)
+    resolved = (df["_EffectiveResolutionDT"].notna()).sum()
+    open_issues = total_issues - resolved
+    median_response = pd.to_timedelta(df["Responding Time (Hrs)"], unit="h").median(skipna=True)
+    median_close    = pd.to_timedelta(df["Computed Closure Time (Hrs)"], unit="h").median(skipna=True)
+    sla_known = df["SLA Met"].dropna() if "SLA Met" in df.columns else pd.Series(dtype=float)
+    sla_rate = (sla_known.mean() * 100) if len(sla_known) else np.nan
+
+    def _fmt(td):
+        if pd.isna(td): return "—"
+        secs = int(td.total_seconds())
+        d, r = divmod(secs, 86400); h, r = divmod(r, 3600); m, _ = divmod(r, 60)
+        if d or h or m: return f"{d}d {h}h {m}m"
+        return "0m"
+
+    t1, t2, t3, t4, t5, t6 = st.columns(6)
+    with t1: st.metric("Total Issues", f"{total_issues}")
+    with t2: st.metric("Resolved (Closed/Effective)", f"{resolved}")
+    with t3: st.metric("Open / Unresolved", f"{open_issues}")
+    with t4: st.metric("Median Closure Time", _fmt(median_close))
+    with t5: st.metric("Median Responding Time", _fmt(median_response))
+    with t6: st.metric("SLA Met Rate", f"{sla_rate:.1f}%" if pd.notna(sla_rate) else "—")
+
+# ---------- Header (robust gradient + white text) ----------
+APP_TITLE = "🧭 Digital — NC Insights Dashboard"
+APP_SUB   = "SJCPL visual theme · Roboto · Brand colors only"
+HEADER_BG = f"linear-gradient(90deg, {BLACK} 0%, {BLUE} 100%)"
+
+# Compute site access label for the current user (shown under the title)
+_auth_user = st.session_state.get("auth_user", {})
+_sites_label = "All Sites"
+try:
+    if _auth_user.get("role") and str(_auth_user.get("role")).lower() == "admin":
+        _sites_label = "All Sites"
+    else:
+        _allowed = set()
+        try:
+            if auth_acl is not None:
+                _allowed = set(auth_acl.allowed_sites_for(_auth_user.get("email", "")))
+        except Exception:
+            _allowed = set()
+        if _allowed:
+            _sites_label = " | ".join(sorted(str(s) for s in _allowed))
+        else:
+            _sites_label = "No Site Assigned"
+except Exception:
+    _sites_label = "All Sites"
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap');
+html, body, [class*="css"], .stApp {{
+  font-family: 'Roboto', sans-serif;
+}}
+div#sj-titlebar {{
+  background-image: {HEADER_BG} !important;
+  background-color: {BLACK} !important;
+  color: {WHITE} !important;
+  padding: 14px 18px; border-radius: 14px; margin: 6px 0 18px 0;
+}}
+div#sj-titlebar h1, div#sj-titlebar p {{
+  color: {WHITE} !important; margin: 0;
+}}
+div#sj-titlebar p {{ margin-top: 4px; opacity: .9; }}
+</style>
+<div id="sj-titlebar">
+  <h1>{APP_TITLE}</h1>
+  <p>{APP_SUB}</p>
+  <p><strong>Site Access:</strong> {_sites_label}</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ---------- Sidebar (brand-locked) ----------
+with st.sidebar:
+    st.title("🧭 Digital NC Register")
+    st.caption("SJCPL brand-locked UI (Roboto + Blue/Black/Grey/White)")
+    logo_url = st.text_input("Logo URL (optional)", value="")
+    st.markdown("#### Data Source")
+    uploaded = st.file_uploader("Upload Issue Register (CSV/XLSX)", type=["csv","xlsx","xls"], key="uploader")
+
+# ---------- Load Data (requested logic) ----------
+def normalize_colname(c: str) -> str:
+    """Keep official column labels intact, but clean whitespace and unicode quirks."""
+    s = str(c).replace("\u2013", "-").replace("\u2014", "-").replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def load_data(file: Optional[io.BytesIO]) -> pd.DataFrame:
+    """
+    Robust reader:
+      - If file is None: pull demo CSV from GitHub
+      - Else: try Excel, else CSV with multiple encodings
+      - Normalize column names and drop duplicate columns
+    """
+    if file is None:
+        # 1) Try to pick latest local file from ./data (by modified time)
+        try:
+            base_dir = os.path.dirname(__file__)
+            data_dir = os.path.join(base_dir, "data")
+            candidates: list[str] = []
+            for pattern in ("*.csv", "*.xlsx", "*.xls"):
+                candidates.extend(glob.glob(os.path.join(data_dir, pattern)))
+            latest_path: Optional[str] = None
+            if candidates:
+                latest_path = max(candidates, key=lambda p: os.path.getmtime(p))
+            if latest_path:
+                name = os.path.basename(latest_path).lower()
+                if name.endswith((".xlsx", ".xls")):
+                    df = pd.read_excel(latest_path)
+                else:
+                    # Try common encodings
+                    last_err = None
+                    for enc in (None, "utf-8", "utf-8-sig", "latin-1"):
+                        try:
+                            df = pd.read_csv(latest_path, encoding=enc)  # type: ignore
+                            break
+                        except Exception as e:
+                            last_err = e
+                            continue
+                    else:
+                        raise last_err or RuntimeError("Could not read latest CSV")
+                try:
+                    st.caption(f"Loaded latest local data file: {os.path.basename(latest_path)}")
+                except Exception:
+                    pass
+            else:
+                # 2) Fallback: demo CSV from GitHub
+                default_path = "https://raw.githubusercontent.com/dnyanesh57/NC_Dashboard/main/data/CSV-INSTRUCTION-DETAIL-REPORT-09-08-2025-04-25-44.csv"
+                df = pd.read_csv(default_path)
+        except Exception:
+            st.error("No file uploaded and no local/latest demo file available.")
+            st.stop()
+    else:
+        name = getattr(file, "name", "uploaded.csv").lower()
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            df = pd.read_excel(file)
+        else:
+            for enc in [None, "utf-8", "utf-8-sig", "latin-1"]:
+                try:
+                    file.seek(0)
+                    df = pd.read_csv(file, encoding=enc)
+                    break
+                except Exception:
+                    continue
+            else:
+                st.error("Could not read the uploaded CSV with common encodings.")
+                st.stop()
+    df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
+    df = df.loc[:, ~pd.Series(df.columns).duplicated().values]
+    return df
+
+@st.cache_data(show_spinner=False)
+def preprocess(df_in: pd.DataFrame) -> pd.DataFrame:
+    df = df_in.copy()
+    df.columns = [c.strip() for c in df.columns]
+    return add_derived_columns(df)
+
+if uploaded is not None:
+    df_raw = load_data(uploaded)
+else:
+    df_raw = load_data(None)
+
+df = preprocess(df_raw)
+
+# ---------- Site scope (Project Name) ----------
+_user_ctx = st.session_state.get("auth_user", {})
+if _user_ctx.get("role") != "admin":
+    try:
+        _allowed_sites = auth_acl.allowed_sites_for(_user_ctx.get("email", ""))
+    except Exception:
+        _allowed_sites = set()
+    st.session_state["allowed_sites"] = _allowed_sites
+    if "Project Name" in df.columns:
+        if _allowed_sites:
+            df = df[df["Project Name"].astype(str).isin([str(x) for x in _allowed_sites])]
+        else:
+            # If any sites are configured in DB and user has none, block data
+            try:
+                _has_sites = len(auth_acl.list_sites()) > 0
+            except Exception:
+                _has_sites = False
+            if _has_sites:
+                st.warning("No site assigned to your account. Please contact admin.")
+                st.stop()
+
+# ---------- Show logo if provided ----------
+st.markdown(
+    f"""
+    <div style="display:flex;justify-content:flex-end;margin:-6px 0 8px 0;">
+      {"<img style='height:32px;object-fit:contain;' src='" + logo_url + "' />" if logo_url else ""}
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# ---------- Global filters ----------
+def get_date_range_inputs(df: pd.DataFrame) -> Tuple[Optional[dt.date], Optional[dt.date]]:
+    enable = st.checkbox("Enable Raised On date filter", value=False, key="datefilter-enable")
+    if not enable:
+        return None, None
+    if df["_RaisedOnDT"].notna().any():
+        dmin = pd.to_datetime(df["_RaisedOnDT"].min()).date()
+        dmax = pd.to_datetime(df["_RaisedOnDT"].max()).date()
+    else:
+        today = dt.date.today()
+        dmin = dmax = today
+    picked = st.date_input("Raised On — Range", value=(dmin, dmax), key="datefilter-range")
+    if isinstance(picked, tuple) and len(picked) == 2:
+        return picked[0], picked[1]
+    return picked, picked
+
+def filtered_view(df: pd.DataFrame) -> pd.DataFrame:
+    with st.sidebar:
+        st.markdown("#### Filters")
+        def options(col: str):
+            return sorted(df.get(col, pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+        proj          = st.multiselect("Project Name", options("Project Name"), key="f-proj")
+        status        = st.multiselect("Current Status", options("Current Status"), key="f-status")
+        types_l0      = st.multiselect("Type L0", options("Type L0"), key="f-typeL0")
+        types_l1      = st.multiselect("Type L1", options("Type L1"), key="f-typeL1")
+        types_l2      = st.multiselect("Type L2", options("Type L2"), key="f-typeL2")
+        tags1         = st.multiselect("Tag 1", options("Tag 1"), key="f-tag1")
+        tags2         = st.multiselect("Tag 2", options("Tag 2"), key="f-tag2")
+        raised_by     = st.multiselect("Raised By", options("Raised By"), key="f-raisedby")
+        assigned_team = st.multiselect("Assigned Team", options("Assigned Team"), key="f-ateam")
+        assigned_user = st.multiselect("Assigned Team User", options("Assigned Team User"), key="f-auser")
+        date_min, date_max = get_date_range_inputs(df)
+
+    m = np.ones(len(df), dtype=bool)
+    def match(col: str, sel: list):
+        if sel:
+            return df.get(col).astype(str).isin([str(x) for x in sel]).to_numpy()
+        return np.ones(len(df), dtype=bool)
+
+    if proj:          m &= match("Project Name", proj)
+    if status:        m &= match("Current Status", status)
+    if types_l0:      m &= match("Type L0", types_l0)
+    if types_l1:      m &= match("Type L1", types_l1)
+    if types_l2:      m &= match("Type L2", types_l2)
+    if tags1:         m &= match("Tag 1", tags1)
+    if tags2:         m &= match("Tag 2", tags2)
+    if raised_by:     m &= match("Raised By", raised_by)
+    if assigned_team: m &= match("Assigned Team", assigned_team)
+    if assigned_user: m &= match("Assigned Team User", assigned_user)
+    if date_min:      m &= (df["_RaisedOnDT"].dt.date >= date_min).fillna(False).to_numpy()
+    if date_max:      m &= (df["_RaisedOnDT"].dt.date <= date_max).fillna(False).to_numpy()
+
+    return df.loc[m].copy()
+
+df_filtered = filtered_view(df)
+st.divider()
+
+metric_colors = THEMES[theme]["metric_map"]
+status_colors = THEMES[theme]["status_map"]
+
+mask_r2c_inferred   = (df_filtered["_R2C_Flag"] == 1)
+mask_responly       = (df_filtered["_RespondedNotClosed_Flag"] == 1)
+
+r2c_count_scope     = int(mask_r2c_inferred.sum())
+resp_only_count     = int(mask_responly.sum())
+total_ncs_scope     = len(df_filtered)
+
+# ---------- User Dashboard (non-admin: single tab style) ----------
+from typing import Set
+
+def render_user_dashboard(df_all: pd.DataFrame, df_f: pd.DataFrame, theme_name: str, allowed_viz: Set[str]):
+    st.header("Dashboard")
+    # Overview
+    if "overview" in allowed_viz:
+        st.subheader("Overview")
+        try:
+            metrics_summary(df_f, theme_name)
+        except Exception:
+            pass
+        if "Current Status" in df_f.columns and len(df_f):
+            vc = df_f["Current Status"].value_counts(dropna=False).reset_index()
+            vc.columns = ["Current Status","Count"]
+            fig_sd = px.bar(vc, x="Current Status", y="Count", text_auto=True,
+                            color="Current Status", color_discrete_sequence=distinct_brand_colors(len(vc)))
+            fig_sd.update_xaxes(tickangle=0, tickfont=dict(size=11))
+            show_chart(style_fig(fig_sd, theme_name), key="usr-ov-status")
+
+    # Project Status (summary)
+    if "project_status" in allowed_viz and "Project Name" in df_f.columns:
+        st.subheader("Project Status (Summary)")
+        grp = df_f.groupby("Project Name").agg(
+            Total=("Reference ID","count") if "Reference ID" in df_f.columns else ("Project Name","count"),
+            Resolved=("_EffectiveResolutionDT", lambda x: x.notna().sum()),
+        ).reset_index()
+        st.dataframe(grp, use_container_width=True)
+        melted = grp.melt(id_vars=["Project Name"], value_vars=["Total","Resolved"], var_name="Metric", value_name="Count")
+        fig_proj = px.bar(melted, x="Project Name", y="Count", color="Metric", barmode="group",
+                          color_discrete_sequence=distinct_brand_colors(melted["Metric"].nunique()))
+        fig_proj.update_xaxes(tickangle=30, tickfont=dict(size=11))
+        show_chart(style_fig(fig_proj, theme_name), key="usr-proj")
+
+    # Project Explorer (basic)
+    if "project_explorer" in allowed_viz:
+        st.subheader("Project Explorer (Basic)")
+        for colname, key in [("Type L0","typeL0"), ("Type L1","typeL1"), ("Type L2","typeL2"), ("Current Status","status")]:
+            if colname in df_f.columns:
+                show_chart(bar_top_counts(df_f, colname, template=THEMES[theme_name]["template"], theme_name=theme_name),
+                           key=f"usr-pe-{key}")
+
+    # User-Wise (basic)
+    if "user_wise" in allowed_viz and "Assigned Team User" in df_f.columns:
+        st.subheader("User-Wise (Basic)")
+        usr = df_f.groupby("Assigned Team User").agg(
+            Total=("Reference ID","count") if "Reference ID" in df_f.columns else ("Assigned Team User","count"),
+            Resolved=("_EffectiveResolutionDT", lambda x: x.notna().sum()),
+        ).reset_index()
+        fig_u_total = px.bar(usr.sort_values("Total", ascending=False).head(25),
+                             x="Assigned Team User", y="Total", title="Top Assignees by Total",
+                             color_discrete_sequence=distinct_brand_colors(1))
+        fig_u_total.update_xaxes(tickangle=30)
+        show_chart(style_fig(fig_u_total, theme_name), key="usr-u-total")
+
+    # NC Table (basic)
+    if "nc_table" in allowed_viz:
+        st.subheader("NC Table")
+        show_cols = [c for c in [
+            "Reference ID","Project Name","Location / Reference","Location Variable (Fixed)",
+            "Type L0","Type L1","Type L2","Tag 1","Tag 2",
+            "Assigned Team","Assigned Team User","Current Status",
+            "Responding Time (Hrs)","Computed Closure Time (Hrs)"
+        ] if c in df_f.columns]
+        if show_cols:
+            st.dataframe(df_f[show_cols].head(1500), use_container_width=True)
+        else:
+            st.info("No known NC columns found.")
+
+
+# If non-admin, render single dashboard and stop
+_user = st.session_state.get("auth_user", {})
+if _user.get("role") != "admin":
+    allowed = st.session_state.get("allowed_viz", set())
+    if not allowed:
+        # Fallback: show at least overview if nothing assigned
+        allowed = {"overview"}
+    render_user_dashboard(df, df_filtered, theme, allowed)
+    st.stop()
+
+# ---------- Tabs (admin only; added "Status") ----------
+tabs = st.tabs([
+    "Overview",
+    "Status",
+    "Project Status",
+    "Project Explorer",
+    "Tower-Wise",
+    "User-Wise",
+    "Activity-Wise",
+    "Timelines",
+    "NC-View",
+    "Sketch-View",
+    "NC Table",
+    "Admin",
+])
+
+# ---------- Admin (User/Group/ACL Management) ----------
+with tabs[11]:
+    st.header("Admin")
+    _u = st.session_state.get("auth_user", {})
+    if _u.get("role") != "admin":
+        st.error("Admin access required.")
+    else:
+        st.markdown("Manage users, groups, and visualization access.")
+
+        admin_tabs = st.tabs(["Users", "Sites", "Groups", "Visualization Access"])
+
+        # Users
+        with admin_tabs[0]:
+            st.subheader("Users")
+            try:
+                _users = auth_acl.list_users()
+            except Exception as e:
+                _users = []
+                st.error(f"Failed to load users: {e}")
+            if _users:
+                st.dataframe(pd.DataFrame(_users)[[c for c in ["email","name","role","is_active","created_at"] if c in pd.DataFrame(_users).columns]], use_container_width=True)
+
+            st.markdown("### Add User")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                nu_email = st.text_input("Email", key="admin-new-email")
+            with c2:
+                nu_name = st.text_input("Name", key="admin-new-name")
+            with c3:
+                nu_role = st.selectbox("Role", ["user","admin"], index=0, key="admin-new-role")
+            with c4:
+                nu_pass = st.text_input("Temp Password", type="password", key="admin-new-pass")
+            if st.button("Create User", key="btn-admin-create-user"):
+                ok, msg = auth_acl.create_user(nu_email, nu_name, nu_pass, nu_role)
+                if ok:
+                    st.success(msg)
+                    st.experimental_rerun()
+                else:
+                    st.error(msg)
+
+            st.markdown("### Manage User")
+            emails = [u["email"] for u in _users] if _users else []
+            sel_user = st.selectbox("Select user", options=emails, key="admin-sel-user")
+            if sel_user:
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    if st.button("Activate", key="btn-activate-user"):
+                        ok, msg = auth_acl.set_active(sel_user, True)
+                        st.success(msg) if ok else st.error(msg)
+                with c2:
+                    if st.button("Deactivate", key="btn-deactivate-user"):
+                        ok, msg = auth_acl.set_active(sel_user, False)
+                        st.success(msg) if ok else st.error(msg)
+                with c3:
+                    newp = st.text_input("Set New Password", type="password", key="admin-set-pass")
+                    if st.button("Set Password", key="btn-set-pass") and newp:
+                        ok, msg = auth_acl.set_password(sel_user, newp)
+                        st.success(msg) if ok else st.error(msg)
+                with c4:
+                    if st.button("Send Reset Email", key="btn-send-reset"):
+                        ok, token = auth_acl.create_password_reset(sel_user)
+                        if ok:
+                            st.success("Reset email attempted; token shown below for reference")
+                            st.code(token)
+                        else:
+                            st.error(token)
+                st.divider()
+                if st.button("Delete User", key="btn-del-user"):
+                    ok, msg = auth_acl.delete_user(sel_user)
+                    if ok:
+                        st.success(msg)
+                        st.experimental_rerun()
+                    else:
+                        st.error(msg)
+
+        # Sites
+        with admin_tabs[1]:
+            st.subheader("Sites (Project Name scope)")
+            # List existing sites
+            try:
+                _sites = auth_acl.list_sites()
+            except Exception as e:
+                _sites = []
+                st.error(f"Failed to load sites: {e}")
+            if _sites:
+                st.dataframe(pd.DataFrame(_sites), use_container_width=True)
+
+            # Add sites from current data or manually
+            st.markdown("### Add Sites")
+            c1, c2 = st.columns([2,1])
+            with c1:
+                # From current dataset
+                proj_vals = sorted(pd.Series(dtype=str))
+                if "Project Name" in df.columns:
+                    proj_vals = sorted(df["Project Name"].dropna().astype(str).unique().tolist())
+                pick_sites = st.multiselect("From 'Project Name'", options=proj_vals, key="admin-pick-sites")
+            with c2:
+                manual_site = st.text_input("Manual site key", key="admin-manual-site")
+                if st.button("Add Manual Site", key="btn-add-manual-site") and manual_site:
+                    ok, msg = auth_acl.create_site(manual_site, manual_site)
+                    st.success(msg) if ok else st.error(msg)
+            if st.button("Add Selected Sites", key="btn-add-selected-sites") and pick_sites:
+                added = 0
+                for skey in pick_sites:
+                    ok, _ = auth_acl.create_site(skey, skey)
+                    if ok:
+                        added += 1
+                st.success(f"Added {added} sites (existing skipped).")
+
+            st.markdown("### Delete Site")
+            del_site = st.selectbox("Select site to delete", options=[s["key"] for s in (_sites or [])], key="admin-del-site")
+            if st.button("Delete Site", key="btn-del-site") and del_site:
+                ok, msg = auth_acl.delete_site(del_site)
+                st.success(msg) if ok else st.error(msg)
+
+            st.markdown("### Assign Users to Sites")
+            emails_all = [u["email"] for u in (_users or [])]
+            sel_u_site = st.selectbox("User", options=emails_all, key="admin-usr-site")
+            site_keys = [s["key"] for s in (_sites or [])]
+            # Show current assignments
+            current_user_sites = auth_acl.list_user_sites(sel_u_site) if sel_u_site else []
+            pick_user_sites = st.multiselect("Sites for user", options=site_keys, default=current_user_sites, key="admin-pick-user-sites")
+            if st.button("Save User Sites", key="btn-save-user-sites") and sel_u_site is not None:
+                # Apply as full replace: assign selected, unassign unselected
+                cur = set(current_user_sites)
+                new = set(pick_user_sites)
+                for sk in (new - cur):
+                    auth_acl.assign_user_to_site(sel_u_site, sk)
+                for sk in (cur - new):
+                    auth_acl.unassign_user_from_site(sel_u_site, sk)
+                st.success("User sites updated.")
+
+        # Groups
+        with admin_tabs[2]:
+            st.subheader("Groups")
+            try:
+                _groups = auth_acl.list_groups()
+            except Exception as e:
+                _groups = []
+                st.error(f"Failed to load groups: {e}")
+            if _groups:
+                st.dataframe(pd.DataFrame(_groups), use_container_width=True)
+            gcol1, gcol2 = st.columns(2)
+            with gcol1:
+                gname = st.text_input("New Group Name", key="admin-new-group")
+                if st.button("Create Group", key="btn-create-group") and gname:
+                    ok, msg = auth_acl.create_group(gname)
+                    st.success(msg) if ok else st.error(msg)
+            with gcol2:
+                gdel = st.selectbox("Delete Group", options=[g["name"] for g in _groups] if _groups else [], key="admin-del-group")
+                if st.button("Delete", key="btn-del-group") and gdel:
+                    ok, msg = auth_acl.delete_group(gdel)
+                    if ok:
+                        st.success(msg)
+                        st.experimental_rerun()
+                    else:
+                        st.error(msg)
+
+            st.markdown("### Membership")
+            all_emails = [u["email"] for u in (_users or [])]
+            all_groups = [g["name"] for g in (_groups or [])]
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                mem_user = st.selectbox("User", options=all_emails, key="admin-mem-user")
+            with mc2:
+                mem_group = st.selectbox("Group", options=all_groups, key="admin-mem-group")
+            with mc3:
+                st.write("")
+                if st.button("Assign", key="btn-assign-ug") and mem_user and mem_group:
+                    ok, msg = auth_acl.assign_user_to_group(mem_user, mem_group)
+                    st.success(msg) if ok else st.error(msg)
+                if st.button("Unassign", key="btn-unassign-ug") and mem_user and mem_group:
+                    ok, msg = auth_acl.unassign_user_from_group(mem_user, mem_group)
+                    st.success(msg) if ok else st.error(msg)
+
+        # Visualization Access
+        with admin_tabs[3]:
+            st.subheader("Visualization Access")

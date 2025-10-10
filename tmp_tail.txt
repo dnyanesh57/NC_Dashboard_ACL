@@ -1,0 +1,200 @@
+        if steps:
+            xs = [t[1] for t in steps]
+            ys = [t[2] for t in steps]
+            fig_step = go.Figure(go.Scatter(x=xs, y=ys, mode="lines+markers", line_shape="hv", line=dict(color=BLUE)))
+            fig_step.update_yaxes(
+                tickmode="array",
+                tickvals=[0,1,2,3,4],
+                ticktext=["Raised","Responded","Rejected","Closed","Effective"]
+            )
+            fig_step.update_layout(title="Status Step Chart", height=260)
+            show_chart(style_fig(fig_step, theme), key="nc-step")
+        else:
+            st.info("Not enough events to render a step chart.")
+
+        # SLA bullet
+        dl = r.get("_DeadlineDT"); ef = r.get("_EffectiveResolutionDT")
+        if pd.notna(rs) and (pd.notna(dl) or pd.notna(ef)):
+            base = pd.to_datetime(rs)
+            dl_hours = (pd.to_datetime(dl) - base).total_seconds()/3600 if pd.notna(dl) else None
+            ef_hours = (pd.to_datetime(ef) - base).total_seconds()/3600 if pd.notna(ef) else None
+            bars = []
+            if dl_hours is not None: bars.append(("Deadline", max(0, dl_hours)))
+            if ef_hours is not None: bars.append(("Actual", max(0, ef_hours)))
+            if bars:
+                bdf = pd.DataFrame(bars, columns=["Metric","Hours"])
+                fig_b = px.bar(bdf, x="Hours", y="Metric", orientation="h",
+                               title="SLA — Deadline vs Actual (hours)",
+                               color="Metric",
+                               color_discrete_sequence=[GREY, BLACK],
+                               text_auto=True)
+                show_chart(style_fig(fig_b, theme), key="nc-sla-bullet")
+        else:
+            st.info("No SLA/Effective times available for bullet chart.")
+
+        st.divider()
+        # ---- All raw fields (one-stop detail view) ----
+        with st.expander("All fields (raw)"):
+            # transpose pretty: two columns if many fields
+            raw_series = r.copy()
+            # Convert datetimes to readable strings
+            for c in raw_series.index:
+                v = raw_series[c]
+                if pd.api.types.is_datetime64_any_dtype(type(v)) or isinstance(v, pd.Timestamp):
+                    raw_series[c] = _fmt_dt(v)
+            # Show as a two-column markdown table for readability
+            keys = list(raw_series.index)
+            half = (len(keys) + 1) // 2
+            left_keys, right_keys = keys[:half], keys[half:]
+            lc, rc = st.columns(2)
+            with lc:
+                for k in left_keys:
+                    st.markdown(f"**{k}:**  {raw_series.get(k, '—')}")
+            with rc:
+                for k in right_keys:
+                    st.markdown(f"**{k}:**  {raw_series.get(k, '—')}")
+    else:
+        st.info("Select an NC to view details.")
+
+# ---------- Sketch-View (Treemap) ----------
+with tabs[9]:
+    st.header("Sketch-View")
+    st.caption("Treemap from 'Location / Reference' (pre-aggregated). Brand palette only.")
+
+    path_col = "Location / Reference" if "Location / Reference" in df_filtered.columns else None
+    if not path_col:
+        st.info("Column 'Location / Reference' not found.")
+    else:
+        treemap_enable = st.checkbox("Show Treemap", value=True, key="sk-enable")
+        max_depth = st.slider("Max depth", 1, 6, 4, step=1, key="sk-depth")
+        max_nodes = st.slider("Max nodes", 100, 5000, 800, step=100, help="Limit total rectangles for performance.", key="sk-nodes")
+        show_badges = st.checkbox("Show status badges in tiles", value=False, key="sk-badges")
+
+        @st.cache_data(show_spinner=False)
+        def build_levels(df_src: pd.DataFrame, col: str, depth: int) -> pd.DataFrame:
+            parts = df_src[col].fillna("").astype(str).str.split("/")
+            out = pd.DataFrame(index=df_src.index)
+            for i in range(depth):
+                out[f"Level_{i}"] = parts.str[i].fillna("").str.strip().where(parts.str.len() > i, "")
+            out["Count"] = 1
+            return out
+
+        def unique_columns(df_in: pd.DataFrame) -> pd.DataFrame:
+            cols = []
+            seen = {}
+            for c in df_in.columns:
+                if c not in seen:
+                    seen[c] = 1; cols.append(c)
+                else:
+                    seen[c] += 1; cols.append(f"{c}__{seen[c]}")
+            df_in = df_in.copy(); df_in.columns = cols
+            return df_in
+
+        if treemap_enable:
+            lv = build_levels(df_filtered, path_col, max_depth)
+            grp_cols = [c for c in lv.columns if c.startswith("Level_")]
+            agg = lv.groupby(grp_cols, dropna=False, as_index=False)["Count"].sum()
+
+            label_cols = []
+            if show_badges and "Current Status" in df_filtered.columns:
+                tmp = df_filtered.copy()
+                tmp["Current Status"] = tmp["Current Status"].fillna("—").astype(str)
+                for i in range(max_depth):
+                    tmp[f"Level_{i}"] = lv[f"Level_{i}"]
+                top_statuses = tmp["Current Status"].value_counts().head(2).index.tolist()
+                for status in top_statuses:
+                    badge = tmp[tmp["Current Status"] == status].groupby(grp_cols).size()
+                    badge = badge.reindex(agg.set_index(grp_cols).index, fill_value=0).values
+                    colname = f"{status}"
+                    agg[colname] = badge
+                    label_cols.append(colname)
+
+            if len(agg) > max_nodes:
+                agg = agg.sort_values("Count", ascending=False).head(max_nodes)
+            agg = unique_columns(agg)
+            path_cols = [c for c in agg.columns if c.startswith("Level_")]
+
+            if show_badges and label_cols:
+                def _mk_label(row):
+                    name = [row[c] for c in path_cols if row[c]][-1] or "(root)"
+                    badges = " ".join([f"{k}:{int(row[k])}" for k in label_cols])
+                    return f"{name}<br><span style='font-size:10px;opacity:.8'>{badges}</span>"
+                labels = agg.apply(_mk_label, axis=1)
+            else:
+                labels = None
+
+            fig_t = px.treemap(
+                agg, path=path_cols, values="Count",
+                color_discrete_sequence=distinct_brand_colors( max(3, len(path_cols)) )
+            )
+            if labels is not None:
+                fig_t.update_traces(texttemplate=labels, hovertemplate="%{label}<br>Count=%{value}<extra></extra>")
+            fig_t.update_layout(title="Location / Reference — Treemap (aggregated)")
+            show_chart(style_fig(fig_t, theme), key="sk-treemap")
+
+        st.subheader("Issues at Selected Path")
+        selected = st.text_input("Filter by path contains", "", key="sketch-filter")
+        view = df_filtered[df_filtered[path_col].str.contains(selected, case=False, na=False)] if selected else df_filtered
+
+        show_cols = [c for c in [
+            "Reference ID","Project Name", path_col, "Location Variable (Fixed)",
+            "Type L0","Type L1","Type L2","Tag 1","Tag 2",
+            "Assigned Team","Assigned Team User","Current Status",
+            "Responding Time (Hrs)","Computed Closure Time (Hrs)","Close After Response (Hrs)"
+        ] if c in view.columns]
+        if len(view):
+            st.dataframe(view[show_cols].head(1500), use_container_width=True)
+        else:
+            st.info("No issues match the selected filter.")
+
+# ---------- NC Table ----------
+with tabs[10]:
+    st.header("NC Table")
+    st.caption("Styled table with row shading by Current Status (brand colours).")
+    shade = st.toggle("Enable row shading", value=False, key="tbl-shade")
+
+    display_cols = [c for c in [
+        "Reference ID","Project Name","Location / Reference","Location Variable (Fixed)",
+        "Location L0","Location L1","Location L2","Location L3",
+        "Description","Recommendation",
+        "Raised By","Raised On Date","Raised On Time",
+        "Deadline Date","Deadline Time",
+        "Assigned Team","Assigned Team User",
+        "Current Status",
+        "Responded By","Responded On Date","Responded On Time",
+        "Rejected By","Rejected On Date","Rejected On Time",
+        "Closed By","Closed On Date","Closed On Time",
+        "Responding Time (Hrs)","Computed Closure Time (Hrs)","Close After Response (Hrs)",
+        "_RespondedNotClosed_Flag", "_R2C_Flag", "_R2C_Strict_Flag",
+        "Type L0","Type L1","Type L2","Tag 1","Tag 2",
+        "Root Cause Analysis","Correction","Corrective Action",
+        "Labour Cost","Material Cost","Machinery Cost","Other Cost","Total Cost"
+    ] if c in df_filtered.columns]
+
+    if not display_cols:
+        st.info("No known NC columns found in the dataset.")
+    else:
+        view = df_filtered[display_cols]
+        if shade:
+            try:
+                st.write(style_status_rows(view.head(1500), theme).to_html(), unsafe_allow_html=True)
+            except Exception:
+                st.dataframe(view.head(1500), use_container_width=True)
+        else:
+            st.dataframe(view.head(1500), use_container_width=True)
+        csv_data = view.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Download filtered table (CSV)", data=csv_data, file_name="digiqc_filtered.csv", mime="text/csv", key="dl-full-table")
+
+st.caption("© Digital Issue Dashboard — Streamlit (SJCPL Brand) — V2.7")
+# ---------- Streamlit compatibility helpers ----------
+def _safe_rerun():
+    try:
+        fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+        if callable(fn):
+            fn()
+        else:
+            # Fallback: toggle a session flag so Streamlit invalidates cache/state
+            st.session_state["_force_rerun_nonce"] = st.session_state.get("_force_rerun_nonce", 0) + 1
+    except Exception:
+        # Last resort: do nothing; page will update on next interaction
+        pass
